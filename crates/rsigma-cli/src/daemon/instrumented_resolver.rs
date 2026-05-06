@@ -49,6 +49,15 @@ impl SourceResolver for InstrumentedResolver {
                 if value.from_cache {
                     self.metrics.source_cache_hits.inc();
                 }
+                self.metrics
+                    .source_last_resolved
+                    .with_label_values(&[source.id.as_str()])
+                    .set(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs_f64(),
+                    );
             }
             Err(e) => {
                 let error_kind = match &e.kind {
