@@ -281,7 +281,7 @@ pub async fn run_daemon(config: DaemonConfig) {
         reload_tx: reload_tx.clone(),
         start_time,
         event_tx: http_event_tx,
-        sources_trigger_tx: sources_trigger_tx_val,
+        sources_trigger_tx: sources_trigger_tx_val.clone(),
         source_resolver: source_resolver_val,
         #[cfg(feature = "daemon-otlp")]
         otlp_event_tx,
@@ -335,10 +335,11 @@ pub async fn run_daemon(config: DaemonConfig) {
     #[cfg(not(feature = "daemon-otlp"))]
     tracing::info!(addr = %actual_addr, "API server listening");
 
-    // Spawn SIGHUP listener
-    let sighup_tx = reload_tx.clone();
+    // Spawn SIGHUP listener (triggers both rule reload and source re-resolution)
+    let sighup_reload_tx = reload_tx.clone();
+    let sighup_sources_tx = sources_trigger_tx_val.clone();
     tokio::spawn(async move {
-        reload::sighup_listener(sighup_tx).await;
+        reload::sighup_listener(sighup_reload_tx, sighup_sources_tx).await;
     });
 
     // Spawn reload handler — uses LogProcessor::reload_rules for atomic hot-reload
