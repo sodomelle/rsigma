@@ -91,7 +91,7 @@ fn apply_cel(data: &serde_json::Value, expr: &str) -> Result<serde_json::Value, 
 
     let mut context = Context::default();
     let cel_value = json_to_cel(data);
-    context.add_variable("data", cel_value);
+    let _ = context.add_variable("data", cel_value);
 
     let result = program.execute(&context).map_err(|e| SourceError {
         source_id: String::new(),
