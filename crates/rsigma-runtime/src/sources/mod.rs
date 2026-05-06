@@ -219,13 +219,28 @@ pub async fn resolve_all(
     resolver: &dyn SourceResolver,
     sources: &[DynamicSource],
 ) -> Result<std::collections::HashMap<String, serde_json::Value>, SourceError> {
+    resolve_all_with_state(resolver, sources, None).await
+}
+
+/// Like [`resolve_all`] but also updates a [`PipelineState`] with source resolution status.
+pub async fn resolve_all_with_state(
+    resolver: &dyn SourceResolver,
+    sources: &[DynamicSource],
+    mut state: Option<&mut rsigma_eval::pipeline::state::PipelineState>,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, SourceError> {
     let mut resolved = std::collections::HashMap::new();
     for source in sources {
         match resolver.resolve(source).await {
             Ok(value) => {
                 resolved.insert(source.id.clone(), value.data);
+                if let Some(s) = state.as_deref_mut() {
+                    s.mark_source_resolved(&source.id);
+                }
             }
             Err(e) => {
+                if let Some(s) = state.as_deref_mut() {
+                    s.mark_source_failed(&source.id);
+                }
                 if source.required {
                     return Err(e);
                 }
