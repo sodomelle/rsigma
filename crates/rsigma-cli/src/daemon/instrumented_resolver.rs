@@ -30,7 +30,7 @@ impl SourceResolver for InstrumentedResolver {
         let source_type_label = source_type_label(&source.source_type);
         self.metrics
             .source_resolves_total
-            .with_label_values(&[&source.id, source_type_label])
+            .with_label_values(&[source.id.as_str(), source_type_label])
             .inc();
 
         let start = Instant::now();
@@ -54,7 +54,7 @@ impl SourceResolver for InstrumentedResolver {
                 };
                 self.metrics
                     .source_resolve_errors
-                    .with_label_values(&[&source.id, error_kind])
+                    .with_label_values(&[source.id.as_str(), error_kind])
                     .inc();
             }
         }
