@@ -570,8 +570,8 @@ fn cache_sqlite_invalidate_persists() {
 
 #[test]
 fn cache_ttl_expiration() {
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     let cache = SourceCache::with_ttl(Duration::from_millis(50));
     cache.store("src1", &serde_json::json!("fresh"));
@@ -586,8 +586,8 @@ fn cache_ttl_expiration() {
 
 #[test]
 fn cache_ttl_evict_expired() {
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     let cache = SourceCache::with_ttl(Duration::from_millis(50));
     cache.store("src1", &serde_json::json!("a"));

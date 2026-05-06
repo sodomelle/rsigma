@@ -122,8 +122,9 @@ pub async fn run_daemon(config: DaemonConfig) {
         None;
 
     if has_dynamic {
-        let instrumented =
-            Arc::new(super::instrumented_resolver::InstrumentedResolver::new(metrics.clone()));
+        let instrumented = Arc::new(super::instrumented_resolver::InstrumentedResolver::new(
+            metrics.clone(),
+        ));
         source_resolver_val = Some(instrumented.clone());
         let resolver: Arc<dyn rsigma_runtime::sources::SourceResolver> = instrumented;
         engine.set_source_resolver(resolver.clone());
