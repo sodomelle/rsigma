@@ -29,6 +29,8 @@ pub struct ResolvedValue {
     pub data: serde_json::Value,
     /// When this value was resolved.
     pub resolved_at: Instant,
+    /// Whether this value was served from cache rather than freshly fetched.
+    pub from_cache: bool,
 }
 
 /// An error that occurred while resolving a dynamic source.
@@ -173,6 +175,7 @@ impl SourceResolver for DefaultSourceResolver {
                             Ok(ResolvedValue {
                                 data: cached,
                                 resolved_at: Instant::now(),
+                                from_cache: true,
                             })
                         } else {
                             Err(err)
@@ -189,6 +192,7 @@ impl SourceResolver for DefaultSourceResolver {
                             Ok(ResolvedValue {
                                 data: json_default,
                                 resolved_at: Instant::now(),
+                                from_cache: false,
                             })
                         } else {
                             Err(err)

@@ -26,13 +26,9 @@ pub struct Metrics {
     pub dlq_events: IntCounter,
     pub detection_matches_by_rule: IntCounterVec,
     pub correlation_matches_by_rule: IntCounterVec,
-    #[allow(dead_code)]
     pub source_resolves_total: IntCounterVec,
-    #[allow(dead_code)]
     pub source_resolve_errors: IntCounterVec,
-    #[allow(dead_code)]
     pub source_resolve_latency: Histogram,
-    #[allow(dead_code)]
     pub source_cache_hits: IntCounter,
     #[cfg(feature = "daemon-otlp")]
     pub otlp_requests: IntCounterVec,

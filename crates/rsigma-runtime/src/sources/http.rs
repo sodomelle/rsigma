@@ -80,6 +80,7 @@ pub async fn resolve_http(
     Ok(ResolvedValue {
         data,
         resolved_at: Instant::now(),
+        from_cache: false,
     })
 }
 

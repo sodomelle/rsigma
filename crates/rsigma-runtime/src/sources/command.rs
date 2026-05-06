@@ -65,5 +65,6 @@ pub async fn resolve_command(
     Ok(ResolvedValue {
         data,
         resolved_at: Instant::now(),
+        from_cache: false,
     })
 }

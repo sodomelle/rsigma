@@ -32,6 +32,7 @@ pub async fn resolve_file(
     Ok(ResolvedValue {
         data,
         resolved_at: Instant::now(),
+        from_cache: false,
     })
 }
 

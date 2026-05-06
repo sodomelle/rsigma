@@ -56,6 +56,7 @@ pub async fn resolve_nats_initial(
     Ok(ResolvedValue {
         data,
         resolved_at: Instant::now(),
+        from_cache: false,
     })
 }
 

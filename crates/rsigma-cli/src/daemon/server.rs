@@ -117,7 +117,9 @@ pub async fn run_daemon(config: DaemonConfig) {
     > = None;
 
     if has_dynamic {
-        let resolver = Arc::new(rsigma_runtime::DefaultSourceResolver::new());
+        let resolver: Arc<dyn rsigma_runtime::sources::SourceResolver> = Arc::new(
+            super::instrumented_resolver::InstrumentedResolver::new(metrics.clone()),
+        );
         engine.set_source_resolver(resolver.clone());
 
         // Resolve dynamic sources at startup (blocks on required sources)

@@ -1,4 +1,5 @@
 mod health;
+mod instrumented_resolver;
 mod metrics;
 mod reload;
 pub(crate) mod server;
