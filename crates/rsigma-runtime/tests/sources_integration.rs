@@ -626,9 +626,9 @@ async fn command_source_timeout_kills_child() {
     let cmd = vec!["sleep".to_string(), "60".to_string()];
     #[cfg(windows)]
     let cmd = vec![
-        "cmd".to_string(),
-        "/C".to_string(),
-        "timeout /T 60 /NOBREAK".to_string(),
+        "powershell".to_string(),
+        "-Command".to_string(),
+        "Start-Sleep -Seconds 60".to_string(),
     ];
 
     let result = rsigma_runtime::sources::command::resolve_command(
