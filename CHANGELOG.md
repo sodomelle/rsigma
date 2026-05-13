@@ -1,0 +1,1052 @@
+# Changelog
+
+All notable changes to RSigma are documented in this file.
+Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma/releases).
+
+## [0.11.0] - 2026-05-13
+
+**TL;DR**
+RSigma v0.11.0 is the "eval performance" release:
+* Matcher optimizer: batches `|contains` lists into Aho-Corasick automata, groups sibling regex matchers into RegexSet DFAs, and eliminates redundant `to_lowercase()` calls via shared case-folding groups.
+* Opt-in bloom filter pre-filtering for substring matchers, skipping entire detection items when trigrams cannot match.
+* Opt-in cross-rule Aho-Corasick prefilter via daachorse (behind the `daachorse-index` feature flag), pruning entire rules before evaluation with up to ~100x speedup on substring-heavy workloads.
+* Security hardening for dynamic pipeline sources: 10 MB body/payload caps on HTTP, command stdout, and NATS; 30-second command execution timeout; 1-second refresh interval floor. Closes all v0.10.0 Known Limitations.
+* Parser fix: the unsupported `|not` modifier is now rejected with guidance toward condition-level negation.
+* Dependency bumps: criterion 0.5.1 to 0.8.2, jsonschema 0.42.2 to 0.46.3.
+
+### Matcher optimizer (PRs #99, #100, #101, #105)
+
+The compiler now includes an optimization pass that restructures `AnyOf` matcher trees for better runtime performance. The optimizer is always on and preserves evaluation semantics exactly. Three transformations are applied in order:
+
+**Aho-Corasick batching.** When an `AnyOf` node contains 8 or more plain `|contains` children with the same case sensitivity, they are collapsed into a single Aho-Corasick automaton (`AhoCorasickSet`). Instead of N sequential substring scans, the engine makes one linear pass over the haystack. The threshold of 8 was chosen empirically from a benchmark sweep: below 8 patterns, sequential `str::contains` with SIMD acceleration (memchr / Two-Way) is faster; at 8 and above, throughput flattens because the AC automaton scans once regardless of pattern count.
+
+| Patterns | h=100 B | h=1 KB | h=8 KB | h=64 KB |
+|---------:|---------|--------|--------|---------|
+| 1  | 13.0 Melem/s | 7.77 Melem/s | 1.85 Melem/s | 248 Kelem/s |
+| 4  | 9.08 Melem/s | 2.03 Melem/s | 293 Kelem/s | 35.6 Kelem/s |
+| **8**  | **5.17 Melem/s** | **620 Kelem/s** | **79.0 Kelem/s** | **9.76 Kelem/s** |
+| 16 | 5.19 Melem/s | 628 Kelem/s | 78.6 Kelem/s | 9.67 Kelem/s |
+| 32 | 4.99 Melem/s | 607 Kelem/s | 76.4 Kelem/s | 8.88 Kelem/s |
+
+**RegexSet batching.** When an `AnyOf` node contains 3 or more `|re` children, they are collapsed into a single `RegexSet` DFA. One DFA pass replaces N independent regex evaluations. Falls back to individual matchers if set construction fails.
+
+**Case-insensitive grouping.** After AC and RegexSet restructuring, if 2 or more surviving children are all case-insensitive and "pre-lowerable," they are wrapped in a `CaseInsensitiveGroup`. The haystack is lowered once via `ascii_lowercase_cow` (borrow-if-already-lower fast path), and all children use `matches_pre_lowered` against the shared lowered string, eliminating repeated allocation.
+
+The optimizer only applies to `AnyOf` (OR) groups, never to `AllOf` (AND). This is a correctness constraint: collapsing AND-of-contains into AC with any-match semantics would change the logic.
+
+**Correctness guarantee.** A new differential fuzz target (`fuzz_eval_matcher_diff`) asserts that `optimize_any_of(matchers)` produces identical match results to `AnyOf(matchers)` for arbitrary needle sets, haystacks, and case sensitivity.
+
+### Bloom filter pre-filtering (PRs #102, #104)
+
+An opt-in trigram-based bloom index that can skip expensive substring matching before it starts. The bloom filter operates at the detection-item level, inside `evaluate_rule`.
+
+**How it works.** At rule load time, the engine extracts positive substring needles (`|contains`, `|startswith`, `|endswith`, and `AhoCorasickSet` needles) from all compiled rules and inserts every 3-byte trigram into a per-field bloom filter (double hashing from AHash-derived pairs). At eval time, for each string field value, the engine slides trigrams over the lowered haystack; if no trigram from any pattern is present in the bloom, the item returns `DefinitelyNoMatch` and the matcher is skipped entirely.
+
+**One-sided correctness.** The bloom filter has no false negatives for "definitely no match." If it says `MaybeMatch`, the full matcher runs as usual. Negated branches, non-string fields, and short/huge values conservatively return `MaybeMatch`.
+
+**Memory budget.** Default total budget is 1 MiB (`DEFAULT_MAX_TOTAL_BYTES`), with a 64 KiB per-field cap. If the total exceeds the budget, fields with the worst bits-per-pattern density are dropped first. The budget is configurable via `Engine::set_bloom_max_bytes`.
+
+**CLI flags.**
+
+```
+rsigma eval -r rules/ -e @events.json --bloom-prefilter
+rsigma eval -r rules/ -e @events.json --bloom-prefilter --bloom-max-bytes 131072
+
+rsigma daemon -r rules/ --bloom-prefilter
+rsigma daemon -r rules/ --bloom-prefilter --bloom-max-bytes 2097152
+```
+
+**When to enable.** The bloom index adds approximately 1 microsecond of per-event trigram probing overhead. It pays off when you have many substring-heavy rules and most events do not match (the common case for threat intel feeds against high-volume telemetry). Benchmark with your own data before enabling in production.
+
+### Cross-rule Aho-Corasick prefilter (PR #106)
+
+An opt-in whole-rule prefilter that prunes entire rules before `evaluate_rule` runs. This is distinct from the per-item matcher optimizer and the per-item bloom filter: it operates at the rule level.
+
+**How it works.** At index build time, the engine collects all positive substring needles (lowered) from every rule and builds one `DoubleArrayAhoCorasick<u32>` automaton per field using the daachorse crate. Pattern IDs map back to rule indices. At eval time, for each indexed field with a string value, one overlapping scan on the lowered haystack marks which rules had at least one pattern hit. Rules that are "AC-prunable" (all detections consist exclusively of positive substring matchers, no negation in conditions, no field-less keywords) and received zero hits are skipped entirely.
+
+**Benchmark results.** 200 non-matching events against N pure-substring rules (best-case workload):
+
+| Rules  | Off (default)            | On (`--cross-rule-ac`)           | Speedup     |
+|-------:|--------------------------|----------------------------------|-------------|
+| 1,000  | 17.34 ms (11.5 Kelem/s)  | 253.0 us (790 Kelem/s)           | **~68x**    |
+| 5,000  | 85.51 ms (2.34 Kelem/s)  | 883.0 us (226 Kelem/s)           | **~97x**    |
+| 10,000 | 173.37 ms (1.15 Kelem/s) | 1.71 ms (117 Kelem/s)            | **~101x**   |
+
+The cross-rule index turns O(rules x patterns) per event into O(haystack_length) for the AC scan, so throughput is essentially constant in rule count.
+
+**Feature flag.** The daachorse dependency is optional and gated behind the `daachorse-index` Cargo feature. Build with:
+
+```
+cargo install rsigma --features daachorse-index
+# or
+cargo build --release --features daachorse-index
+```
+
+**CLI flags.**
+
+```
+rsigma eval -r rules/ -e @events.json --cross-rule-ac
+rsigma daemon -r rules/ --cross-rule-ac
+```
+
+**When to enable.** This is off by default. For typical mixed workloads (substring + exact + regex rules, events that hit multiple fields, smaller rule sets), the index adds build-time and lookup overhead with smaller wins or none, and can cause a slowdown. Enable for large (5K+ rules), substring-heavy, shared-pattern packs where most events do not match. Always benchmark against representative data first.
+
+**Composition.** The three prefilter layers stack: the rule index narrows by exact field values, the cross-rule AC narrows by substring patterns, and the bloom filter skips individual detection items. All three can be enabled simultaneously; regression tests assert that the combined output matches the no-prefilter baseline.
+
+### Security hardening for dynamic pipeline sources (PR #96)
+
+This release closes all four items listed under "Known Limitations" in the v0.10.0 release notes. Dynamic pipeline sources that fetch from HTTP, command, or NATS now enforce resource limits.
+
+**HTTP response body size limit.** Responses are capped at 10 MB (`MAX_SOURCE_RESPONSE_BYTES`). If the server advertises a `Content-Length` exceeding the limit, the response is rejected without buffering the body. During streaming, if the accumulated body exceeds the limit, the connection is dropped. A 30-second client timeout is also enforced.
+
+**Command execution timeout and stdout size limit.** Command sources are killed after 30 seconds (`DEFAULT_COMMAND_TIMEOUT`). Stdout is read in 8 KB chunks and capped at 10 MB; exceeding the limit kills the child process. Stderr is separately capped at 64 KB to prevent a chatty failing command from exhausting memory.
+
+**NATS message payload size limit.** NATS messages exceeding 10 MB are rejected before parsing.
+
+**Refresh interval floor.** Source refresh intervals below 1 second are clamped to 1 second with a structured warning log. This prevents config mistakes or hostile configs from causing tight polling loops.
+
+All limits use a new `SourceErrorKind::ResourceLimit` variant with descriptive messages. Integration tests validate timeout killing, stdout size rejection, and NATS payload rejection.
+
+### Parser: reject `|not` modifier (PR #103)
+
+Writing `field|not: value` in a Sigma rule is a common mistake. The `not` keyword is a condition-level operator, not a value modifier. Previously this would produce a generic "unknown modifier" error. Now the parser returns a dedicated `NotIsNotAModifier` error with guidance:
+
+> `not` is not a value modifier in Sigma; express negation in the condition (e.g. `not selection`) or move the inverted check into a separate detection used as a filter (e.g. `selection and not other`)
+
+### Regression test suite (PRs #105, #106)
+
+A new `regression_eval.rs` test file (459 lines) locks down optimizer and prefilter correctness with differential tests:
+
+| Test | What it validates |
+|------|-------------------|
+| `baseline_contains_heavy_corpus` | Multi-rule contains-heavy corpus produces expected match sets |
+| `allof_contains_semantics_preserved` | `\|contains\|all` requires all needles (not collapsed to AC with OR semantics) |
+| `keyword_aho_corasick_path_correct` | Field-less `keywords:` block with enough terms to hit AC path |
+| `bloom_prefilter_preserves_match_results` | Bloom on vs off produces identical results |
+| `bloom_prefilter_handles_condition_negation` | `not other` with `\|contains` under bloom short-circuit |
+| `optimizer_runs_after_pipeline_transformation` | Pipeline maps field names before optimizer runs |
+| `cross_rule_ac_preserves_match_results` | Cross-rule AC on vs off produces identical results |
+| `cross_rule_ac_handles_condition_negation` | `not other` with cross-rule AC |
+| `cross_rule_ac_composes_with_bloom` | All three prefilters enabled together match the baseline |
+
+### Benchmarks (PRs #105, #106)
+
+Five new Criterion benchmark groups with dedicated data generators:
+
+| Group | What it measures |
+|-------|------------------|
+| `eval_contains_heavy` | 1-200 `\|contains` patterns per rule, 1000 events |
+| `eval_ac_threshold_sweep` | Pattern counts 1-32 across haystack lengths 100 B to 64 KB |
+| `eval_regex_set_heavy` | 3-50 wildcard patterns per rule via RegexSet |
+| `eval_bloom_rejection` | 100-5000 substring-only rules with guaranteed non-matching events, bloom on vs off |
+| `eval_cross_rule_ac` | 1K-10K substring-only rules with non-matching events, cross-rule AC on vs off |
+
+Results are recorded in `BENCHMARKS.md`.
+
+### Other changes
+
+* **Stale warning fix (PR #98):** replaced the Phase 1 placeholder warning for dynamic pipelines with the correct message now that the feature is complete.
+* **Rustdoc (PR #106):** surfaced `Engine::set_bloom_prefilter`, `Engine::set_bloom_max_bytes`, `Engine::set_cross_rule_ac`, and `SigmaParserError::NotIsNotAModifier` in public documentation.
+* **criterion migration (PR #95):** bumped criterion from 0.5.1 to 0.8.2; replaced deprecated `criterion::black_box` with `std::hint::black_box` across all benchmark files.
+* **jsonschema bump (PR #94):** bumped jsonschema from 0.42.2 to 0.46.3.
+* **VS Code extension (PR #97):** bumped fast-uri from 3.1.0 to 3.1.2 (Dependabot).
+* **README link:** added link to the fourth blog article.
+
+[v0.10.0...v0.11.0](https://github.com/timescale/rsigma/compare/v0.10.0...v0.11.0)
+
+## [0.10.0] - 2026-05-08
+
+**TL;DR**
+RSigma v0.10.0 is the "dynamic pipelines" release:
+* Dynamic Sigma Pipelines: declare HTTP, command, file, and NATS sources inside pipeline YAML, with template expansion, include directives, TTL caching, background refresh, and three extract languages (jq, JSONPath, CEL).
+* A new `rsigma resolve` CLI command and full daemon integration with Prometheus instrumentation.
+* Native EVTX input: evaluate Sigma rules directly against Windows Event Log binary files.
+* Pipeline hot-reload: the daemon now watches pipeline files alongside rules.
+* Builtin pipelines: `ecs_windows` and `sysmon` embedded at compile time.
+* Comprehensive fuzz testing: 14 cargo-fuzz harnesses covering all untrusted input surfaces.
+* Security hardening: SQL injection prevention, recursion limits, condition DoS caps, SIGTERM handler, and event size limits.
+* CI and supply chain: MSRV enforcement, cargo-deny, serde_yaml migration, Dependabot, SECURITY.md, and CONTRIBUTING.md.
+
+### Dynamic Sigma Pipelines (PRs #86-#93)
+
+Pipelines can now declare external data sources that are resolved at runtime and injected into pipeline fields via template expansion. This is a capability unique to RSigma: no other Sigma engine supports dynamic processing pipelines.
+
+**Four source types.** A new `sources` section in pipeline YAML declares named data sources:
+
+```yaml
+sources:
+  threat_intel:
+    type: http
+    url: https://feeds.example.com/iocs.json
+    format: json
+    extract:
+      expr: ".indicators[].value"
+      type: jsonpath
+    refresh:
+      interval: 300
+    on_error: use_cached
+    required: false
+```
+
+| Source type | Description |
+| --- | --- |
+| `http` | Fetch from a URL (GET/POST) with optional headers |
+| `command` | Execute a local command and capture stdout |
+| `file` | Read from a local file path |
+| `nats` | Subscribe to a NATS subject for push-based updates |
+
+**Template expansion.** Pipeline field values reference resolved source data via `${source.threat_intel}` syntax. Templates are expanded after all sources resolve, before the pipeline is applied to rules.
+
+**Three extract languages.** Source responses can be filtered before injection:
+
+| Type | Engine | Example |
+| --- | --- | --- |
+| `jq` (default) | jaq | `.records[] \| .ip` |
+| `jsonpath` | jsonpath-rust | `$.indicators[*].value` |
+| `cel` | cel-interpreter | `data.filter(x, x.severity > 3)` |
+
+**Include directives.** Pipelines can include other pipeline fragments via `include` sources, with a recursive depth limit of 1. Remote includes (HTTP, NATS) require the `--allow-remote-include` daemon flag.
+
+**TTL-based caching.** Resolved source data is cached in SQLite with configurable TTL. A cache invalidation API allows on-demand refresh without waiting for expiry.
+
+**Background refresh.** After startup, sources refresh on their configured interval in the background. Failures for non-required sources do not block the pipeline; the last cached value is used (configurable via `on_error: use_cached | fail | ignore`).
+
+**SIGHUP re-resolution.** Sending SIGHUP to the daemon triggers both a rule reload and a full source re-resolution cycle.
+
+**NATS control subject.** A NATS message on a configurable control subject triggers source re-resolution, enabling external orchestration of pipeline updates.
+
+**`rsigma resolve` command (PR #88).** A new CLI subcommand resolves dynamic sources and prints results:
+
+```
+rsigma resolve -p pipelines/dynamic_threat_intel.yml
+rsigma resolve -p pipelines/dynamic_threat_intel.yml -s threat_intel --pretty
+rsigma resolve -p pipelines/dynamic_threat_intel.yml --dry-run
+```
+
+**`rsigma validate --resolve-sources` (PR #88).** Validate that pipeline sources can be resolved successfully alongside rule validation.
+
+**Prometheus metrics (PR #88).** Five new metrics track source resolution in the daemon:
+
+| Metric | Labels | Description |
+| --- | --- | --- |
+| `rsigma_source_resolves_total` | `source_id`, `source_type` | Total source resolution attempts |
+| `rsigma_source_resolve_errors_total` | `source_id`, `error_kind` | Resolution errors by kind (Fetch, Parse, Extract, Timeout) |
+| `rsigma_source_resolve_seconds` | | Resolution latency histogram |
+| `rsigma_source_cache_hits_total` | | Cache hit counter |
+| `rsigma_source_last_resolved_timestamp` | `source_id` | Unix timestamp of last successful resolution |
+
+**`/api/v1/status` extension (PR #88).** The status endpoint now includes a `dynamic_sources` summary when sources are configured:
+
+```json
+{
+  "status": "running",
+  "dynamic_sources": {
+    "total": 3,
+    "resolves_total": 42,
+    "errors_total": 1,
+    "cache_hits": 38
+  }
+}
+```
+
+**Full test coverage.** Integration and E2E tests validate the entire dynamic pipeline lifecycle against real daemon instances (PR #90). Criterion benchmarks measure resolution throughput and template expansion overhead (PR #91). Seven dedicated fuzz targets cover source YAML parsing, template expansion, extract expressions, include parsing, and HTTP response handling (PR #92). SigmaHQ corpus regression validates that dynamic pipelines do not regress existing static pipeline behavior (PR #93).
+
+### EVTX input adapter (PR #85)
+
+RSigma can now evaluate Sigma rules directly against Windows Event Log binary files (`.evtx`). The adapter uses the `evtx` crate to parse the binary format and yield JSON records that feed directly into the detection engine.
+
+```
+rsigma eval -r rules/windows/ -e @Security.evtx
+rsigma eval -r rules/ -p sysmon -e @Microsoft-Windows-Sysmon%4Operational.evtx
+```
+
+Auto-detection is extension-based: any `@path` argument ending in `.evtx` (case-insensitive) is routed through the EVTX parser. The feature is compile-time gated behind the `evtx` feature flag (included in default features).
+
+### Pipeline hot-reload (PR #68)
+
+The daemon file watcher now monitors pipeline YAML files alongside the rules directory. Changes to any referenced pipeline file trigger the same debounced reload cycle as rule changes:
+
+1. **Filesystem events** on watched `.yml`/`.yaml` files (500 ms debounce)
+2. **SIGHUP** signal (Unix)
+3. **`POST /api/v1/reload`** endpoint
+
+If a pipeline file fails to parse during reload, the old engine configuration is preserved and `rsigma_reloads_failed_total` is incremented.
+
+Builtin pipelines (`ecs_windows`, `sysmon`) are embedded at compile time and excluded from the file watcher.
+
+### Bundled pipelines (PR #69)
+
+Two processing pipelines are now embedded in the binary via `include_str!()`:
+
+| Name | Description |
+| --- | --- |
+| `ecs_windows` | Sigma/Sysmon field names to Elastic Common Schema (process creation, network, file, registry, DNS, pipe, driver, remote thread, process access) |
+| `sysmon` | Adds EventID conditions for logsource-to-Sysmon-event routing |
+
+Reference them by name instead of a file path:
+
+```
+rsigma eval -r rules/ -p ecs_windows -e @events.json
+rsigma daemon -r rules/ -p sysmon
+rsigma convert -r rules/ -t postgres -p ecs_windows
+```
+
+### Fuzz testing (PR #70, PR #92)
+
+Fourteen cargo-fuzz harnesses now cover every untrusted input surface:
+
+| Target | Surface |
+| --- | --- |
+| `fuzz_parse_yaml` | Sigma YAML parser |
+| `fuzz_condition` | Condition expression parser |
+| `fuzz_field_modifiers` | Field modifier parsing |
+| `fuzz_eval_matching` | Event evaluation engine |
+| `fuzz_regex_compile` | Regex pattern compilation |
+| `fuzz_pipeline_yaml` | Pipeline YAML parsing |
+| `fuzz_input_formats` | Input format auto-detection (JSON, syslog, logfmt, CEF) |
+| `fuzz_pipeline_sources_yaml` | Dynamic source YAML parsing |
+| `fuzz_extract_jq` | jq extract expression evaluation |
+| `fuzz_extract_jsonpath` | JSONPath extract expression evaluation |
+| `fuzz_extract_cel` | CEL extract expression evaluation |
+| `fuzz_template_expand` | Template `${source.*}` expansion |
+| `fuzz_include_parse` | Include directive parsing |
+| `fuzz_http_response` | HTTP response body handling |
+
+Seed corpora include real SigmaHQ rules, handcrafted adversarial inputs, and valid pipeline examples. A weekly scheduled CI job runs all targets with per-target `--max_len` limits. Crashes upload as artifacts.
+
+### Security hardening (PRs #71-#76)
+
+Six PRs address security, robustness, and code quality:
+
+**SQL injection prevention (PR #71).** The PostgreSQL backend now validates all identifiers (table, schema, field segments) against `^[A-Za-z_][A-Za-z0-9_$]*$` before embedding them in SQL. Malicious inputs are rejected with `ConvertError::InvalidIdentifier` instead of being interpolated.
+
+**Unbounded recursion limits (PR #71).** YAML deep-merge is capped at 64 levels (`MAX_DEPTH`). Exceeding the limit returns `SigmaParserError::MergeTooDeep`.
+
+**Condition DoS caps (PR #71).** Condition expressions are limited to 64 KiB (`MAX_CONDITION_LEN`) and 64 nesting levels (`MAX_CONDITION_DEPTH`). Both limits return descriptive parse errors instead of stack overflow.
+
+**SIGTERM handler (PR #74).** The daemon now handles `SIGTERM` with the same graceful shutdown path as `Ctrl+C`: drain the pipeline within `--drain-timeout`, persist correlation state, and exit cleanly.
+
+**parking_lot mutexes (PR #74).** Internal mutexes migrated from `std::sync::Mutex` to `parking_lot::Mutex` for fairer scheduling and no poisoning.
+
+**Event size cap (PR #74).** HTTP ingestion rejects individual lines exceeding 1 MiB with `413 Payload Too Large`.
+
+**Code quality (PR #75).** `KEY_CACHE` completeness test ensures all modifier keys are cached. `partial_cmp` replaced with `total_cmp` for deterministic float comparisons.
+
+**Testing gaps (PR #76).** Runtime integration tests and parser AST snapshot tests added to cover previously untested paths.
+
+### CI and supply chain (PRs #72-#73)
+
+**MSRV enforcement.** A dedicated CI job runs `cargo check --workspace --all-features --locked` on the declared MSRV (1.88.0).
+
+**cargo-deny.** Advisory database checking and license scanning via `cargo-deny` in CI. Known advisory `RUSTSEC-2021-0153` (evtx transitive dep on `encoding`) is documented and allow-listed.
+
+**serde_yaml migration.** All crates migrated from the unmaintained `serde_yaml` to `yaml_serde` 0.10.4 via Cargo package renaming, with zero source-level changes required.
+
+**Dependabot (PR #84).** Automated dependency updates enabled; all flagged dependencies bumped in a single batch.
+
+**SECURITY.md and CONTRIBUTING.md (PR #73).** Security disclosure policy and contribution guidelines added to the repository root.
+
+### Other changes
+
+* **`--dry-run` for `rsigma resolve`**: inspect source metadata (type, refresh policy, required flag) without performing actual resolution.
+* **Cross-platform command source tests**: Windows-compatible assertions for command-type dynamic sources.
+* **MSRV 1.88.0 type inference fix**: explicit type annotations for `prometheus` `with_label_values` calls to satisfy the minimum supported Rust version.
+* **CI: removed semver-checks job**: semver compatibility checking removed from the CI pipeline (was producing false positives on internal API changes).
+* **Benchmark documentation**: full Criterion benchmark results recorded across all crates.
+* **README updates**: dynamic pipelines documented across root, rsigma-cli, and rsigma-runtime READMEs.
+
+### Known Limitations
+
+Dynamic pipeline sources that fetch from HTTP, NATS, or command execution do not yet enforce resource limits on response size, execution timeout, or refresh interval. Specifically:
+- HTTP responses are read to completion without a body size cap
+- Command sources inherit the daemon process timeout but lack a per-source timeout enforcement
+- NATS push sources do not cap payload size
+- No minimum floor on refresh interval (a very short interval could cause excessive load)
+
+These hardening items are tracked as a roadmap item and will either ship in v0.10.1 or in v0.11.0. The feature is opt-in (sources must be explicitly declared in pipeline YAML by the operator), and the critical injection/recursion/DoS vectors are already addressed in this release.
+
+[v0.9.0...v0.10.0](https://github.com/timescale/rsigma/compare/v0.9.0...v0.10.0)
+
+## [0.9.0] - 2026-05-04
+
+**TL;DR**
+RSigma v0.9.0 is one of the largest releases yet:
+* Production-grade NATS JetStream with at-least-once delivery, authentication and TLS, dead-letter queues, replay from offset or timestamp, consumer groups, and sequence-aware correlation state restoration
+* Native OpenTelemetry log ingestion over HTTP (protobuf + JSON) and gRPC
+* A new LynxDB conversion backend for SPL2-compatible queries
+* The `rsigma fields` field catalog
+* Structured exit codes for CI/CD scripting
+* Per-rule Prometheus metric labels
+* The entire codebase restructured into directory-based modules
+* And a comprehensive E2E test suite validating every I/O path against real Postgres and NATS instances via testcontainers
+
+### NATS production hardening (PR #59)
+
+Five features bring the NATS pipeline from development-grade to production-ready.
+
+**At-least-once delivery with deferred ack.** The streaming pipeline has been refactored from at-most-once to at-least-once delivery. Messages are now held in an `AckToken` until the sink confirms delivery. A new `RawEvent` struct bundles each payload with its ack token, and a dedicated ack task resolves tokens after sink confirmation. If the daemon crashes before ack, NATS redelivers the message after `ack_wait` expires. The `EventSource` trait now returns `Option<RawEvent>` instead of `Option<String>`, and `NatsSink` has been upgraded from core NATS publish to JetStream publish with server-confirmed persistence.
+
+**Authentication and TLS.** A new `NatsConnectConfig` struct supports credentials file, token, username/password, NKey, mutual TLS (client cert + key), and require-TLS. Auth methods are mutually exclusive; the first configured one wins. Sensitive values can also be read from environment variables.
+
+| CLI flag | Environment variable | Description |
+| --- | --- | --- |
+| `--nats-creds` | `NATS_CREDS` | Credentials file path |
+| `--nats-token` | `NATS_TOKEN` | Authentication token |
+| `--nats-user` / `--nats-password` | `NATS_USER` / `NATS_PASSWORD` | Username and password |
+| `--nats-nkey` | `NATS_NKEY` | NKey seed |
+| `--nats-tls-cert` / `--nats-tls-key` | | Client certificate and key for mutual TLS |
+| `--nats-require-tls` | | Require TLS on the connection |
+
+**Dead-letter queue.** Events that fail processing are routed to a configurable DLQ instead of being silently discarded. The `--dlq` flag accepts the same URL schemes as `--output` (`stdout://`, `file://`, `nats://`). Each DLQ entry is a JSON object containing `original_event`, `error`, and `timestamp`. Integration points: parse errors detected before engine processing and sink delivery failures. A new `rsigma_dlq_events_total` Prometheus counter tracks DLQ volume.
+
+```
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --dlq file:///var/log/rsigma-dlq.ndjson
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --dlq nats://localhost:4222/dlq.rsigma
+```
+
+**Replay from offset or timestamp.** A `ReplayPolicy` enum (`Resume`, `FromSequence`, `FromTime`, `Latest`) controls the JetStream consumer's starting position. Three mutually exclusive CLI flags set the policy. Correlation state restoration is handled intelligently based on the replay direction (see "Smart correlation state restoration" below).
+
+```
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --replay-from-sequence 42
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --replay-from-time 2026-04-30T00:00:00Z
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --replay-from-latest
+```
+
+**Consumer groups for horizontal scaling.** The `--consumer-group` flag sets a shared durable consumer name across multiple daemon instances. All instances using the same group name pull from a single JetStream consumer, and NATS automatically distributes messages for load balancing. When not specified, the consumer name is auto-derived from the subject (existing behavior).
+
+```
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --consumer-group detection-workers
+```
+
+### Smart correlation state restoration (PR #61)
+
+The daemon now makes intelligent decisions about whether to restore correlation state from SQLite when restarting with a replay flag. Previously, any non-`Resume` replay policy unconditionally cleared correlation state to avoid double-counting. This was correct for forensic replay but overly conservative for forward catch-up scenarios where the daemon shuts down and restarts with `--replay-from-sequence` pointing after the last processed event.
+
+**Sequence-aware auto-restore.** The daemon now tracks the NATS JetStream stream sequence and published timestamp of the last acknowledged message. This `SourcePosition` is stored alongside the correlation snapshot in SQLite (two new columns added via automatic schema migration). On restart, the `decide_state_restore` function compares the replay start point against the stored position: if the replay starts after the stored position (forward catch-up), state is restored safely; if at or before (backward replay), state is cleared to prevent double-counting.
+
+**Explicit overrides.** Two new mutually exclusive CLI flags give operators direct control when the automatic decision is not appropriate:
+
+| Flag | Behavior |
+| --- | --- |
+| `--keep-state` | Always restore correlation state, regardless of replay policy |
+| `--clear-state` | Always clear correlation state and start fresh |
+| _(neither)_ | Automatic decision based on replay direction and stored position |
+
+```
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --replay-from-sequence 1001 --state-db state.db
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --replay-from-sequence 1 --state-db state.db
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --replay-from-sequence 1 --state-db state.db --keep-state
+```
+
+**Timestamp fallback control.** A new `--timestamp-fallback` flag (`wallclock` or `skip`) controls how correlation windows handle events without parseable timestamp fields. The default `wallclock` substitutes the current time (existing behavior). The new `skip` mode causes detections to still fire but omits the event from correlation state updates, preventing wall-clock times from corrupting temporal windows during forensic replay of historical logs.
+
+```
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --timestamp-fallback skip
+```
+
+**Automatic schema migration.** Existing SQLite state databases are transparently migrated on first open. The migration adds the `source_sequence` and `source_timestamp` columns without losing the existing correlation snapshot.
+
+### Codebase modularization (PRs #46-#58)
+
+Thirteen PRs systematically split 12 large single-file modules into directory-based module structures across all six crates, improving navigability and reducing merge conflicts. The refactoring is purely structural with no behavioral changes.
+
+| PR | File | Result |
+| --- | --- | --- |
+| #46 | `lint.rs` (4,991 lines) | `lint/{mod,rules/{metadata,detection,correlation,filter,shared}}.rs` |
+| #47 | `main.rs` (2,221 lines) | `commands/{parse,validate,lint,eval,convert}.rs` |
+| #48 | `postgres.rs` (3,183 lines) | `postgres/{mod,correlation,tests}.rs` |
+| #49 | `correlation_engine.rs` (4,395 lines) | `correlation_engine/{mod,types,tests}.rs` |
+| #50 | `transformations.rs` (3,379 lines) | `pipeline/transformations/{mod,helpers,tests}.rs` |
+| #51 | `parser.rs` (2,276 lines) | `parser/{mod,detection,correlation,filter,tests}.rs` |
+| #52 | `pipeline/mod.rs` (2,235 lines) | `pipeline/{mod,parsing}.rs` |
+| #53 | `compiler.rs` (1,824 lines) | `compiler/{mod,helpers,tests}.rs` |
+| #54 | `correlation.rs` (1,781 lines) | `correlation/{mod,types,buffers,compiler,keys,window,tests}.rs` |
+| #55 | `engine.rs` (1,656 lines) | `engine/{mod,filters,tests}.rs` |
+| #56 | `matcher.rs` (1,118 lines) | `matcher/{mod,matching,helpers}.rs` |
+| #57 | `event.rs` (758 lines) | `event/{mod,json,kv,plain,map}.rs` |
+| #58 | `cli/tests/cli.rs` (1,745 lines) | `tests/{cli_parse,cli_validate,cli_lint,cli_eval,cli_daemon,common/mod}.rs` |
+
+Additional cleanup: `is_valid_uuid` was de-duplicated across lint rule modules, and pipeline parsing logic was extracted from `mod.rs` into its own submodule.
+
+### E2E test suite (PR #60)
+
+A comprehensive end-to-end test suite validates every major I/O path against real infrastructure. All container-based tests use testcontainers and are automatically skipped when Docker is unavailable.
+
+**PostgreSQL integration tests.** Convert Sigma rules to SQL and execute the generated queries against a real PostgreSQL instance. Uses the Okta cross-tenant impersonation scenario with JSONB schema, 6 sample events, and 4 SigmaHQ detection rules. Tests cover default format, `VIEW` creation, multi-rule conversion, `event_count` correlation, and the no-match case.
+
+**NATS E2E tests (binary-level).** Spawn the `rsigma` daemon as a child process with `--input`/`--output` NATS URLs pointed at a testcontainers NATS instance. Four tests cover single detection, no-match silence, `event_count` correlation, and fan-out to multiple output subjects.
+
+**NATS E2E tests (library-level).** Additional integration tests in `rsigma-runtime` covering JetStream publish/subscribe, detection routing, and the article scenarios from the companion blog series.
+
+**HTTP daemon E2E tests.** Spawn the daemon with `--input http` and `--api-addr 127.0.0.1:0`, discover the ephemeral port from structured log output, and exercise all REST endpoints: `healthz`, `readyz`, `metrics`, `rules`, `status`, `reload`, and `POST /api/v1/events` with single and batch NDJSON payloads.
+
+**Input format tests.** CLI-level tests for syslog, plain text, and auto-detect input formats on both the `daemon` and `eval` commands.
+
+**Snapshot-based convert tests.** Integration tests for the `convert` subcommand that compare CLI output against expected snapshots.
+
+The state restore feature adds 10 additional E2E tests (6 HTTP-based, 4 NATS-based with testcontainers) covering `--clear-state`, `--keep-state`, `--timestamp-fallback`, schema migration, and sequence-aware forward/backward replay.
+
+In total, roughly 4,700 lines of integration tests across 10 new test files, plus 850 lines of NATS-specific tests in `rsigma-runtime`.
+
+### OTLP log ingestion (PR #64)
+
+Native OpenTelemetry Protocol (OTLP) log receiver for the daemon. Three transports feed into a shared conversion layer that flattens each OTLP `LogRecord` (merged with parent Resource and InstrumentationScope attributes) into a JSON event and routes it through the detection engine.
+
+**OTLP/HTTP.** `POST /v1/logs` accepts both protobuf (`application/x-protobuf`) and JSON (`application/json`) encoding. When `Content-Encoding: gzip` is present, the body is decompressed before decoding. Protobuf is assumed when no `Content-Type` is provided, matching the OTLP/HTTP specification default.
+
+**OTLP/gRPC.** `LogsService/Export` is registered via tonic and multiplexed with the existing Axum REST endpoints on the same `--api-addr` port using `accept_http1(true)`, so HTTP/1.1 REST clients and HTTP/2 gRPC clients share a single listener.
+
+**Prometheus metrics.** Three new counters track OTLP traffic:
+
+| Metric | Labels | Description |
+| --- | --- | --- |
+| `rsigma_otlp_requests_total` | `transport`, `encoding` | OTLP export requests received |
+| `rsigma_otlp_log_records_total` | | Log records ingested via OTLP |
+| `rsigma_otlp_errors_total` | `transport`, `reason` | OTLP request errors |
+
+**Feature gating.** OTLP is compile-time gated behind the `daemon-otlp` feature flag (not in default features). Build with `cargo build --features daemon-otlp`. When enabled, OTLP endpoints are always active alongside any `--input` mode.
+
+```
+rsigma daemon -r rules/ --input http --api-addr 0.0.0.0:9090
+```
+
+Tests: 9 integration tests covering HTTP protobuf, JSON, gzip, error cases (415 unsupported content type, 400 malformed payload), end-to-end detection triggering, and metrics exposure. 7 unit tests for the LogRecord-to-JSON conversion.
+
+### LynxDB backend (PR #62)
+
+A new conversion backend for LynxDB, a Go-based log analytics engine with an SPL2-compatible query language. Translates Sigma detection rules into `FROM <index> | search <predicates>` queries with deferred `| where` clauses for features that require regex or CIDR evaluation.
+
+| Sigma feature | LynxDB syntax |
+| --- | --- |
+| Field equality | `field=value`, `field="quoted value"` |
+| Wildcard (`*`) | `field=prefix*`, `field=*contains*` |
+| Wildcard (`?`) | Deferred: `\| where field =~ "regex"` |
+| Regex (`\|re`) | Deferred: `\| where field =~ "pattern"` |
+| CIDR (`\|cidr`) | Deferred: `\| where cidrmatch("cidr", field)` |
+| Case-sensitive (`\|cased`) | `field=CASE(value)` |
+| Boolean AND/OR/NOT | Explicit parenthesization for LynxDB's non-standard precedence (NOT > OR > AND) |
+| IN-list | `field IN (val1, val2, ...)` |
+| Keyword search | Bare value (matches `_raw`) |
+
+Two output formats: `default` (`FROM main | search ...`) and `minimal` (search expression only, for API `q` parameters). Index selection from pipeline state, defaulting to `main`.
+
+```
+rsigma convert rules/suspicious_process.yml -t lynxdb
+rsigma convert rules/ -t lynxdb -f minimal
+```
+
+Tests: 30+ unit tests and 9 golden test cases.
+
+### `rsigma fields` subcommand (PR #65)
+
+A new subcommand that extracts and lists every field name referenced by a set of Sigma rules. Useful for understanding field coverage, validating pipeline mappings, and auditing detection scope.
+
+Field sources: detection item keys, correlation `group_by` and `condition` fields, correlation alias mapping values, filter detections, and rule `fields:` metadata. Each field is annotated with the source categories that reference it (`detection`, `correlation`, `filter`, `metadata`).
+
+| Flag | Description |
+| --- | --- |
+| `-r` / `--rules` | Path to a rule file or directory (required) |
+| `-p` / `--pipeline` | Pipeline YAML file(s) to apply; shows post-mapping field names |
+| `--no-filters` | Exclude fields contributed by filter rules |
+| `--json` | Output as JSON with summary stats and pipeline mapping details |
+
+```
+rsigma fields -r rules/
+rsigma fields -r rules/ -p pipelines/ecs.yml --json
+```
+
+Table output sends data to stdout and stats to stderr, enabling clean piping. 16 integration tests with insta inline snapshots.
+
+### Structured exit codes (PR #66)
+
+All subcommands now return categorized exit codes instead of a blanket `exit(1)` on any failure, enabling reliable CI/CD scripting with `$?`.
+
+| Exit code | Constant | Meaning |
+| --- | --- | --- |
+| 0 | `SUCCESS` | Operation completed successfully |
+| 1 | `FINDINGS` | Detections fired (`eval`) or lint findings above threshold (`lint`) |
+| 2 | `RULE_ERROR` | Rule syntax, parse, or compilation error |
+| 3 | `CONFIG_ERROR` | Pipeline, configuration, or invalid argument error |
+
+Two new flags control when a non-zero exit indicates "findings found":
+
+- `eval --fail-on-detection`: exit 1 when any detection or correlation fires.
+- `lint --fail-level <error|warning|info>`: configurable severity threshold; default `error` preserves backward compatibility.
+
+```
+rsigma eval -r rules/ events.json --fail-on-detection || exit 1
+rsigma lint -r rules/ --fail-level warning
+```
+
+### Per-rule Prometheus metrics (PR #63)
+
+Two new labeled `IntCounterVec` metrics alongside the existing aggregate counters enable per-rule alerting and dashboarding without parsing log output.
+
+| Metric | Labels |
+| --- | --- |
+| `rsigma_detection_matches_by_rule_total` | `rule_title`, `level` |
+| `rsigma_correlation_matches_by_rule_total` | `rule_title`, `level`, `correlation_type` |
+
+```promql
+rate(rsigma_detection_matches_by_rule_total{rule_title="Okta Cross-Tenant Impersonation"}[5m]) > 100
+```
+
+### Other changes
+
+* **Daemon hang fix**: when the `daemon-otlp` feature was enabled with stdin or NATS input, the daemon could hang after the source completed because OTLP handler clones kept the event channel open. Fixed by signaling source completion via `tokio::sync::Notify` and draining the channel with `select!`.
+* **CI hardening (PR #67 + follow-ups)**: added `cargo-llvm-cov` code coverage with native GitHub job summary report, `zizmor` workflow audit with pedantic persona and SARIF upload, concurrency groups on all workflows, and action pin fixes (`dtolnay/rust-toolchain` pinned to `v1` tag, `Swatinem/rust-cache` pinned to dereferenced commit SHA). Codecov was initially added and then replaced with the native job summary to eliminate the external service dependency.
+* **README rewrite**: new Supported Features section, updated architecture diagrams, OTLP log ingestion documentation, and shield badges.
+* **Test reliability**: fixed a flaky macOS test where FSEvents file watcher backpressure filled the bounded reload channel, causing a 429 on the reload endpoint. The test now retries with backoff.
+
+[v0.8.1...v0.9.0](https://github.com/timescale/rsigma/compare/v0.8.1...v0.9.0)
+
+## [0.8.1] - 2026-04-29
+
+**TL;DR**
+RSigma v0.8.1 is a patch release for the PostgreSQL backend. Dotted Sigma field names (like `securityContext.isProxy`) now generate correct chained JSONB operators when using `-O json_field=...`.
+
+### Nested JSONB field paths ([#45](https://github.com/timescale/rsigma/pull/45))
+
+When `json_field` is set (e.g. `-O json_field=data`), the PostgreSQL backend now generates chained `->` / `->>` operators for dotted Sigma field names instead of treating the entire dotted string as a single flat key.
+
+**Before (v0.8.0):**
+
+```sql
+SELECT * FROM okta_events WHERE data->>'securityContext.isProxy' = 'true'
+```
+
+**After (v0.8.1):**
+
+```sql
+SELECT * FROM okta_events WHERE data->'securityContext'->>'isProxy' = 'true'
+```
+
+Deeply nested paths work as expected:
+
+| Sigma field | Generated SQL |
+|-------------|---------------|
+| `eventType` | `data->>'eventType'` (unchanged) |
+| `securityContext.isProxy` | `data->'securityContext'->>'isProxy'` |
+| `actor.detail.sub.field` | `data->'actor'->'detail'->'sub'->>'field'` |
+
+All intermediate segments use `->` (returns `jsonb`), and the final segment uses `->>` (returns `text`). Flat field names without dots are unaffected. NULL propagation works correctly for existence checks: `data->'nonexistent'->>'child'` returns NULL, so `IS NOT NULL` behaves as expected on nested paths.
+
+This is particularly important for Okta System Log rules from SigmaHQ, where fields like `securityContext.isProxy` and `client.ipAddress` reference nested JSON objects.
+
+[v0.8.0...v0.8.1](https://github.com/timescale/rsigma/compare/v0.8.0...v0.8.1)
+
+## [0.8.0] - 2026-04-28
+
+**TL;DR**
+RSigma v0.8.0 is the "rule conversion" release. A new `rsigma-convert` crate transforms Sigma rules into backend-native query strings through a pluggable `Backend` trait. The first production backend targets PostgreSQL/TimescaleDB, a backend unique to RSigma and inspired by [pySigma-backend-sqlite](https://github.com/SigmaHQ/pySigma-backend-sqlite) and [pySigma-backend-athena](https://github.com/SigmaHQ/pySigma-backend-athena). The CLI gains `convert`, `list-targets`, and `list-formats` commands. Multi-arch Docker images are now published to GHCR on every release. Processing pipelines support one-to-many field name mapping, and filter rules reach full behavioral parity with pySigma.
+
+Please test this (and RSigma in general) and provide feedback. Contributions are also very welcome.
+
+### `rsigma-convert` crate ([#36](https://github.com/timescale/rsigma/pull/36))
+
+A new library crate for converting parsed Sigma rules into backend-native queries (SQL, SPL, KQL, Lucene, etc.):
+
+- **`Backend` trait** with ~30 methods covering condition dispatch, detection item conversion, field/value escaping, regex, CIDR, comparison operators, field existence, field references, keywords, IN-list optimization, deferred expressions, and query finalization.
+- **`TextQueryConfig`** with ~90 configuration fields mirroring pySigma's `TextQueryBackend` class variables: precedence, boolean operators, wildcards, string/field quoting, match expressions (startswith/endswith/contains + case-sensitive variants), regex/CIDR templates, compare ops, IN-list optimization, unbound values, deferred parts, and query envelope.
+- **Condition tree walker** that recursively converts `ConditionExpr` nodes into query strings with selector/quantifier support.
+- **Orchestrator** via `convert_collection()`, which applies pipelines, converts each rule, and collects results and errors.
+- **Deferred expressions** through the `DeferredExpression` trait and `DeferredTextExpression` for backends that need post-query appendages (e.g. Splunk `| regex`, `| where`).
+- **Test backend** (`TextQueryTestBackend` and `MandatoryPipelineTestBackend`) for backend-neutral foundation testing.
+
+### PostgreSQL/TimescaleDB backend ([#37](https://github.com/timescale/rsigma/pull/37), [#38](https://github.com/timescale/rsigma/pull/38), [#43](https://github.com/timescale/rsigma/pull/43), [#44](https://github.com/timescale/rsigma/pull/44))
+
+The first production backend, and one that has no equivalent in the pySigma ecosystem. It is inspired by [pySigma-backend-sqlite](https://github.com/SigmaHQ/pySigma-backend-sqlite) and [pySigma-backend-athena](https://github.com/SigmaHQ/pySigma-backend-athena), targeting PostgreSQL natively and leveraging features that map cleanly to Sigma modifiers:
+
+| Sigma Modifier | PostgreSQL SQL |
+|----------------|---------------|
+| `contains` | `ILIKE` (case-insensitive) |
+| `startswith` / `endswith` | `ILIKE` |
+| `cased` | `LIKE` (case-sensitive) |
+| `re` | `~*` (case-insensitive regex) or `~` (with `cased`) |
+| `cidr` | `field::inet <<= 'value'::cidr` |
+| `exists` | `IS NOT NULL` / `IS NULL` |
+| keywords | `to_tsvector() @@ plainto_tsquery()` |
+
+Five output formats:
+
+| Format | Description |
+|--------|-------------|
+| `default` | Plain `SELECT * FROM {table} WHERE ...` queries |
+| `view` | `CREATE OR REPLACE VIEW sigma_{id} AS SELECT ...` |
+| `timescaledb` | Queries with `time_bucket()` for TimescaleDB optimization |
+| `continuous_aggregate` | `CREATE MATERIALIZED VIEW ... WITH (timescaledb.continuous)` |
+| `sliding_window` | Correlation queries using window functions for per-row sliding detection |
+
+Additional capabilities:
+
+- **SELECT column selection** (inspired by pySigma-backend-athena): when a Sigma rule specifies `fields:`, the backend emits `SELECT field1, field2, ...` instead of `SELECT *`. Supports `field as alias` syntax and passthrough of function calls.
+- **CLI backend options**: `-O key=value` flags are now wired through to the PostgreSQL backend. Recognized keys: `table`, `schema`, `database`, `timestamp_field`, `json_field`, `case_sensitive_re`.
+- **Custom table/schema/database resolution** at three levels: rule-level `custom_attributes`, pipeline `set_state`, and backend defaults.
+- **Multi-table temporal correlations**: when referenced detection rules target different tables (via per-logsource pipeline routing or custom attributes), the backend automatically generates a `UNION ALL` CTE. Single-table correlations use the simpler direct approach.
+- **CTE-based correlation pre-filtering** (inspired by pySigma-backend-athena): non-temporal correlations wrap referenced rules' queries in a `WITH combined_events AS (q1 UNION ALL q2 ...)` CTE, so aggregations only count events matching the detection logic rather than scanning the entire table.
+- **Sliding window correlations** (inspired by pySigma-backend-athena): the `sliding_window` output format uses SQL window functions (`COUNT(*) OVER (PARTITION BY ... ORDER BY ... RANGE BETWEEN INTERVAL ... PRECEDING AND CURRENT ROW)`) for `event_count` correlations. This produces a per-row sliding window that identifies every event crossing the threshold, complementing the default `GROUP BY` + `HAVING` approach for periodic polling.
+- **OCSF processing pipelines**: two included pipelines for single-table (`ocsf_postgres.yml`) and per-logsource multi-table routing (`ocsf_postgres_multi_table.yml`).
+- **Reference TimescaleDB schema** with hypertable setup, indexes (B-tree, GIN for full-text and JSONB), compression, retention policies, and an example continuous aggregate.
+- **Correlation SQL generation** using `GROUP BY` / `HAVING` for aggregation types (`event_count`, `value_count`, `value_sum`, `value_avg`, `value_percentile`, `value_median`) and CTEs with window functions for temporal correlation.
+
+### CLI: `convert`, `list-targets`, `list-formats`
+
+```bash
+rsigma convert -r rules/ -t postgres
+rsigma convert -r rules/ -t postgres -p pipelines/ocsf_postgres.yml -f view
+rsigma convert -r rules/ -t postgres -p pipelines/ocsf_postgres_multi_table.yml
+rsigma convert -r rules/ -t postgres -p pipelines/ocsf_postgres.yml -f continuous_aggregate
+rsigma convert -r rules/ -t postgres -O table=security_logs -O schema=public -O timestamp_field=created_at
+rsigma convert -r rules/ -t postgres -f sliding_window
+rsigma list-targets
+rsigma list-formats postgres
+```
+
+Options include `-p` / `--pipeline` (repeatable), `-f` / `--format`, `-o` / `--output`, `--skip-unsupported`, `--without-pipeline`, and `-O` / `--option` for backend-specific key=value pairs.
+
+### Multi-arch Docker image ([#39](https://github.com/timescale/rsigma/pull/39))
+
+Multi-arch images (linux/amd64, linux/arm64) are published to GHCR on every release:
+
+```bash
+docker pull ghcr.io/timescale/rsigma:latest
+docker run --rm ghcr.io/timescale/rsigma:latest --help
+```
+
+### One-to-many field name mapping ([#40](https://github.com/timescale/rsigma/pull/40), [#41](https://github.com/timescale/rsigma/pull/41))
+
+Thanks to @fwosar, `FieldNameMapping` now supports mapping a single source field to multiple alternative field names. When more than one alternative is present, the matched detection item is replaced with an OR-conjunction (`AnyOf`) of items, one per alternative, preserving the rule's original AND structure across the rest of the items in the same selection via Cartesian expansion.
+
+```yaml
+transformations:
+  - id: multi_field_mapping
+    type: field_name_mapping
+    mapping:
+      CommandLine:
+        - process.command_line
+        - process.args
+```
+
+The expansion is capped at 4,096 combinations per detection to prevent runaway Cartesian products in rules with many multi-mapped fields. For correlation rules, `group_by` fields are expanded to include all alternatives, while `aliases` mapping values and threshold `field` reject one-to-many mappings with an error since those positions are inherently scalar.
+
+### pySigma filter parity ([#42](https://github.com/timescale/rsigma/pull/42))
+
+Filter rules now match pySigma semantics across parsing, application, and linting:
+
+- `filter.rules` accepts `"any"` (string) and omission, both meaning "apply to all rules". The new `FilterRuleTarget` enum (`Any` | `Specific(Vec<String>)`) replaces the old `Vec<String>`.
+- Filter condition expressions are rewritten with namespaced identifiers (`__filter_0_selection`) and applied as written, instead of hardcoding AND-NOT. Filters that exclude events must use `not selection` explicitly in their condition.
+- Logsource matching changed from symmetric compatibility to asymmetric containment: every field the filter specifies must be present and equal in the rule, but fields the filter omits are treated as wildcards.
+- `FilterRule` and `CorrelationRule` AST types now carry the full set of standard Sigma fields.
+
+### Pipeline and eval changes
+
+- **Pipeline finalizers**: new `pipeline/finalizers.rs` module for post-pipeline processing hooks used by the conversion path.
+- **`QueryExpressionPlaceholders`**: this transformation now stores the expression template in pipeline state, enabling the conversion engine to apply query envelope templates.
+- **`apply_field_name_transform`** now returns `Result<()>`, propagating errors from one-to-many expansion overflow.
+
+### Breaking Changes
+
+| Before (0.7.0) | After (0.8.0) |
+|----------------|---------------|
+| `FieldNameMapping { mapping: HashMap<String, String> }` | `FieldNameMapping { mapping: HashMap<String, Vec<String>> }` |
+| `CorrelationCondition::Threshold { predicates, field: Option<String> }` | `CorrelationCondition::Threshold { predicates, field: Option<Vec<String>>, percentile: Option<u64> }` |
+| `FilterRule { rules: Vec<String>, .. }` | `FilterRule { rules: FilterRuleTarget, .. }` |
+| Filter conditions auto-negated (`AND NOT filter_cond`) | Filter conditions applied as written (use `not selection` explicitly) |
+
+### Contributors
+
+Thanks to @fwosar for the one-to-many field name mapping feature (#40).
+
+[v0.7.0...v0.8.0](https://github.com/timescale/rsigma/compare/v0.7.0...v0.8.0)
+
+## [0.7.0] - 2026-04-23
+
+**TL;DR**
+RSigma v0.7.0 is the "any log format" release. The evaluation engine now operates on a generic `Event` trait instead of raw JSON, a new `rsigma-runtime` library crate decouples the streaming pipeline from the CLI, and the daemon can ingest JSON, syslog (RFC 3164/5424), logfmt, CEF, and plain text, with auto-detection by default. Hand-rolled zero-dependency parsers for logfmt and CEF keep the dependency tree lean.
+
+This release is inspired by [sigma_engine](https://github.com/SigmaHQ/sigma_engine), thanks to @thomaspatzke and [Sigma HQ](https://sigmahq.io/) folks.
+
+### Generic Event trait (breaking)
+
+The `rsigma-eval::Event` struct has been replaced by an `Event` trait with three concrete implementations:
+
+- **`JsonEvent`**: wraps `serde_json::Value` (the previous behavior)
+- **`KvEvent`**: key-value map for structured formats (syslog, logfmt, CEF)
+- **`PlainEvent`**: raw text for keyword-only matching
+
+An `EventValue` enum provides typed access to field values across all implementations. This is a breaking change: callers using `Event::new(value)` should switch to `JsonEvent::borrow(&value)` or `JsonEvent::owned(value)`.
+
+### `rsigma-runtime` crate
+
+The streaming pipeline has been extracted from the CLI daemon into a reusable library crate:
+
+- **`RuntimeEngine`**: wraps `Engine` + `CorrelationEngine` with rule loading, hot-reload, and state management.
+- **`LogProcessor`**: batch processing pipeline with `ArcSwap` for atomic engine swap, pluggable `MetricsHook`, and `EventFilter` for JSON payload extraction (e.g. `.records[]`).
+- **Input format adapters** (`input/` module): JSON, syslog, logfmt, CEF, plain text, and auto-detect.
+- **I/O primitives**: `EventSource` trait and `Sink` enum moved from the CLI.
+
+### Multi-format input (`--input-format`)
+
+The `daemon` and `eval` commands now accept `--input-format` and `--syslog-tz`:
+
+```bash
+rsigma daemon -r rules/
+rsigma daemon -r rules/ --input-format syslog --syslog-tz +0530
+rsigma eval -r rules/ --input-format logfmt < app.log
+rsigma eval -r rules/ --input-format cef < arcsight.log
+```
+
+Auto-detect validates syslog parsing results (checks for facility/severity/hostname) before accepting and it won't misparse random text as syslog.
+
+### Zero-dependency parsers
+
+- **logfmt**: hand-rolled parser supporting quoted values with escape sequences, bare keys, and mixed whitespace. No external dependencies.
+- **CEF (Common Event Format)**: hand-rolled parser for the full ArcSight CEF spec including 7-field pipe-delimited header + key=value extensions with `\=`, `\n`, `\\` escapes. Handles syslog-wrapped CEF via `find_cef_start()`.
+
+Both are feature-gated (`logfmt`, `cef`) and thoroughly tested with real-world log samples.
+
+### Examples and benchmarks
+
+Baseline results (Apple M4 Pro, 100 rules):
+
+| Format | Throughput |
+|--------|-----------|
+| Plain text | 5.5-10.9 Melem/s |
+| Syslog | 1.26-1.40 Melem/s |
+| JSON | 955 Kelem/s-1.15 Melem/s |
+| Auto-detect | ~966 Kelem/s-1.09 Melem/s |
+
+Rule-count scaling is near-flat from 100 to 1,000 rules thanks to logsource index pruning.
+
+### Other changes
+
+- **Custom attributes** (`custom_attributes`): propagate custom rule attributes through results, then unified across detection and correlation rules into a single `custom_attributes` field (breaking: `custom_rule_attributes` removed). Thanks to @fwosar (#26).
+- **Lint `--exclude`**: glob patterns to skip files during linting, plus detection of deprecated aggregation syntax.
+- **Line feeds in conditions**: fixed parsing of condition expressions containing line breaks. Thanks to @fwosar (#24).
+- **Dependencies**: `notify` 7 -> 8.2, `rustls-webpki` -> 0.103.13.
+- **`BENCHMARKS.md`**: documents all benchmark groups, baseline results, and the 5% regression threshold.
+
+### Breaking Changes
+
+| Before (0.6.0) | After (0.7.0) |
+|----------------|---------------|
+| `use rsigma_eval::Event;` (struct) | `use rsigma_eval::event::Event;` (trait) |
+| `Event::new(value)` | `JsonEvent::borrow(&value)` or `JsonEvent::owned(value)` |
+| `Event::from_value(v)` | `JsonEvent::borrow(&v)` |
+| `result.custom_rule_attributes` | `result.custom_attributes` |
+
+### Contributors
+
+Thanks to @fwosar for their contributions to this release (#24, #26).
+
+[v0.6.0...v0.7.0](https://github.com/timescale/rsigma/compare/v0.6.0...v0.7.0)
+
+## [0.6.0] - 2026-04-17
+
+**TL;DR**
+RSigma grew up. v0.6.0 makes the daemon production-ready for streaming detection: plug it into NATS JetStream or HTTP, fan out to multiple sinks, and let rayon + an inverted index chew through rules **2-3x faster**. Stateful correlation still survives restarts via SQLite, stdin/stdout still works by default, and `cargo audit` is back to **zero vulnerabilities**.
+
+This release resolves the "not meant for streaming logs" gap correctly identified in [Detection Engineering Weekly #149](https://www.detectionengineering.net/p/dew-149-roll-your-own-sigma-siem) by [Zack Allen](https://www.linkedin.com/in/zack-allen-12749a76/) and positions RSigma as a single-node streaming detection engine -- not just a CLI forensics tool. Three levels of work landed:
+
+1. **Level 1**: pluggable I/O adapters (NATS, HTTP, file, fan-out)
+2. **Level 2**: async pipeline hardening (backpressure, micro-batching, drain)
+3. **Level 3**: inverted index + feature-gated rayon parallel batch evaluation
+
+### Streaming I/O adapters (Level 1)
+
+The daemon now speaks NATS JetStream, HTTP, and files and not just stdin/stdout.
+
+```bash
+rsigma daemon -r rules/ --input http
+rsigma daemon -r rules/ --input nats://localhost:4222/events.> --output nats://localhost:4222/detections
+rsigma daemon -r rules/ --output file:///var/log/detections.ndjson
+rsigma daemon -r rules/ --output stdout --output file:///tmp/detections.ndjson
+```
+
+- **`EventSource` trait + `Sink` enum**: pluggable adapters with enum dispatch; async-friendly `Sink::FanOut(Vec<Sink>)` for multi-sink output.
+- **`--input`/`--output` URL schemes**: `stdin://`, `http://`, `nats://`, `file://`, `stdout://`; multiple `--output` flags clone `ProcessResult` per sink via bounded mpsc channels.
+- **`daemon-nats` feature flag**: gates `async-nats`; durable JetStream consumer with ACK, publisher sink.
+
+### Async pipeline hardening (Level 2)
+
+- **Fully async stdin** via `tokio::io::AsyncBufReadExt` (no more `spawn_blocking`).
+- **Configurable back-pressure**: `--buffer-size` (default 10,000) sets bounded mpsc capacity for both source-to-engine and engine-to-sink queues.
+- **Micro-batched evaluation**: `--batch-size` (default 1); engine collects up to N events per mutex acquisition via `try_recv()`.
+- **Graceful drain on shutdown**: `--drain-timeout` (default 5s) lets in-flight events finish before state save; natural EOF drains without timeout.
+- **5 new Prometheus metrics**: `rsigma_input_queue_depth`, `rsigma_output_queue_depth`, `rsigma_back_pressure_events_total`, `rsigma_pipeline_latency_seconds`, `rsigma_batch_size`.
+
+### Performance: inverted index + parallel batch evaluation (Level 3)
+
+- **Inverted index**: `RuleIndex` maps `(field, exact_value)` to rule indices at load time. `Engine::evaluate()` queries candidates instead of scanning all rules. Rules without exact-match items are marked unindexable and always evaluated (no false negatives).
+- **Feature-gated rayon**: new `parallel` feature on `rsigma-eval` enables `Engine::evaluate_batch()` and `CorrelationEngine::process_batch()`. Parallel detection + sequential correlation via a borrow split.
+- **Benchmark results** (5,000 rules, synthetic events):
+  - Detection evaluation: **2.4-2.7x speedup** from indexing alone.
+  - Correlation throughput: **~1.7x improvement** (indexed + sequential).
+  - Batch evaluation scales with core count.
+
+### New public APIs (`rsigma-eval`)
+
+- `Engine::evaluate_batch(&self, events: &[&Event]) -> Vec<Vec<MatchResult>>`
+- `CorrelationEngine::evaluate(&self, event: &Event) -> Vec<MatchResult>`
+- `CorrelationEngine::process_with_detections(&mut self, event, detections, timestamp_secs) -> ProcessResult`
+- `CorrelationEngine::process_batch(&mut self, events: &[&Event]) -> Vec<ProcessResult>`
+
+### Pipeline parity
+
+- **Named condition IDs** supported in `rule_cond_expression` (not just numeric indices).
+- **Correlation rules** now apply processing pipelines consistently with detection rules.
+
+### Dependencies and security
+
+- `async-nats` 0.46 to 0.47 (drops pinned vulnerable `rustls-webpki 0.102.8`, `rustls-pemfile 2.2.0`, `rand 0.8.5`)
+- `rustls-webpki` to 0.103.12 (RUSTSEC-2026-0049/-0098/-0099)
+- `rand` to 0.9.4 (RUSTSEC-2026-0097)
+- `lodash` override to 4.18.x in VS Code extension (devDependency-only)
+- `cargo audit`: 0 vulnerabilities
+
+[v0.5.0...v0.6.0](https://github.com/timescale/rsigma/compare/v0.5.0...v0.6.0)
+
+## [0.5.0] - 2026-02-26
+
+### Daemon mode (`rsigma daemon`)
+
+rsigma can now run as a long-running service for real-time event processing, with hot-reload, health checks, metrics, and a REST API.
+
+```bash
+rsigma daemon -r rules/ -p ecs.yml --api-addr 127.0.0.1:8080
+```
+
+- **Hot-reload**: file watcher, SIGHUP, and `/api/v1/reload` endpoint. Correlation state is preserved across reloads.
+- **Health endpoints**: `/healthz`, `/readyz`
+- **Prometheus metrics**: events processed, detection/correlation matches, rules loaded, uptime, state entries
+- **REST API**: `/api/v1/status`, `/api/v1/rules`, `/api/v1/reload`
+- **Structured logging**: JSON via `tracing` with `RUST_LOG` control
+
+### SQLite state persistence (`--state-db`)
+
+Correlation state (windows, suppression timers, event buffers) now survives daemon restarts.
+
+```bash
+rsigma daemon -r rules/ -p ecs.yml --state-db ./rsigma-state.db --state-save-interval 10
+```
+
+- Periodic snapshots (configurable via `--state-save-interval`, default 30s)
+- Graceful shutdown save
+- Schema-versioned snapshots for forward compatibility
+- Base64-encoded compressed event buffers for efficient storage
+- State preserved across hot-reloads (export before engine swap, re-import after)
+
+### CI
+
+- All workflows now use `--all-features` to cover daemon-gated code
+
+### Dependencies
+
+- Removed `protobuf` transitive dependency (disabled `prometheus` default features) -- resolves RUSTSEC-2024-0437
+
+[v0.4.0...v0.5.0](https://github.com/timescale/rsigma/compare/v0.4.0...v0.5.0)
+
+## [0.4.0] - 2026-02-23
+
+### Bug fixes
+
+* **Filter name collision** -- Multiple filters sharing detection names (e.g. both using `selection`) no longer overwrite each other. Filter detections are now namespaced with a counter to prevent key collisions.
+* **CVE-2026-26996** -- Upgraded `minimatch` to 10.2.1 in the VS Code extension.
+
+### Validation improvements
+
+* **`UnknownDetection` at compile time** -- Condition expressions referencing non-existent detections now fail eagerly during `compile_rule()` instead of silently at eval time.
+* **`UnknownRuleRef` at load time** -- Correlation `rule_refs` are validated to resolve to known rules or correlations when calling `add_collection()`.
+
+### Dependency upgrades
+
+* `yamlpatch` 0.11 to 0.12, `yamlpath` 0.33 to 0.34 (Unicode-aware patching, empty-route `RewriteFragment` fix).
+* `jsonschema` 0.29 to 0.42 (13 minor versions of improvements).
+* `tower-lsp` 0.20 to `tower-lsp-server` 0.23 (actively maintained community fork; native async traits).
+* 49 transitive crate updates via `cargo update`.
+
+### Test coverage
+
+* ~1,300 lines of new tests: end-to-end integration, correlation edge cases, parser/eval error paths, and pipeline error handling.
+
+### Breaking changes
+
+* Removed `EvalError::TimestampParse` variant (unused).
+
+[v0.3.0...v0.4.0](https://github.com/timescale/rsigma/compare/v0.3.0...v0.4.0)
+
+## [0.3.0] - 2026-02-19
+
+### Auto-fix for Sigma lint rules
+
+This release adds machine-applicable fix suggestions to the linter, exposed through both the CLI and the LSP server.
+
+- **`rsigma lint --fix`** -- Apply safe fixes in-place. Uses format-preserving YAML editing (`yamlpath`/`yamlpatch`) so comments and formatting are retained.
+- **LSP code actions** -- Quick-fix lightbulb in editors for all fixable lint warnings. Fixes are converted to `TextEdit`s and offered when the cursor overlaps the warning range.
+- **Fix infrastructure** -- `Fix`, `FixDisposition` (Safe/Unsafe), and `FixPatch` (`ReplaceValue`, `ReplaceKey`, `Remove`) types in `rsigma-parser`. 13 lint rules carry safe fix suggestions.
+
+### Improvements
+
+- Improved parser error reporting with better span information.
+- Expanded modifier validation and test coverage.
+
+### Fixable lint rules
+
+`invalid_status`, `invalid_level`, `non_lowercase_key`, `logsource_value_not_lowercase`, `unknown_key`, `duplicate_tags`, `duplicate_references`, `duplicate_fields`, `single_value_all_modifier`, `all_with_re`, `wildcard_only_value`, `filter_has_level`, `filter_has_status`
+
+[v0.2.0...v0.3.0](https://github.com/timescale/rsigma/compare/v0.2.0...v0.3.0)
+
+## [0.2.0] - 2026-02-17
+
+### Linter, LSP, Processing Pipelines, and Correlation Engine
+
+First release of rsigma -- a Sigma detection toolkit in Rust. Ships a parser, evaluation engine, 65-rule linter, LSP server, processing pipelines, correlation engine, and cross-platform CLI.
+
+### New features
+
+- **Parser** (`rsigma-parser`) -- Sigma YAML to strongly-typed AST via PEG grammar; 30 modifiers; multi-document YAML support.
+- **Evaluation engine** (`rsigma-eval`) -- Compile-then-evaluate architecture for Sigma rules against JSON log events.
+- **Linter** -- 65 built-in lint rules from the Sigma spec v2.1.0 with Error/Warning/Info/Hint severity, per-rule suppression (`rsigma-suppress`), and colored terminal output.
+- **LSP server** (`rsigma-lsp`) -- Diagnostics, completions, hover, and document symbols; packaged as a VS Code extension with esbuild bundling.
+- **Processing pipelines** -- All 26 pySigma transformation types for full pipeline parity (field mapping, value transforms, logsource rewriting, drop rules).
+- **Correlation engine** -- All 7 Sigma correlation types plus `repeat`, `percentile`, and `range` conditions; configurable timestamp fallback; cycle detection; chain depth warnings; compressed event storage for `include_event` mode.
+- **CLI** -- `parse`, `validate`, `eval`, `lint` subcommands; `@file` syntax for `--event`; `--jq`/`--jsonpath` event filters; alert suppression; `action-on-fire`; `generate` flag; NDJSON streaming.
+- Binary release workflow for cross-platform builds (Linux, macOS, Windows).
+- Trusted publishing workflow for crates.io.
+- CI: tests on Linux/macOS/Windows, Sigma corpus regression job, `cargo-audit` security scanning.
+
+### Fixes
+
+- Hard cap on correlation state when time-based eviction is insufficient.
+- Empty `AllOf`/`AnyOf` detections rejected at compile time.
+- `|re` modifier is case-sensitive by default per Sigma spec.
+- `windash` modifier includes all five Sigma spec characters.
+- `Event::get_field` traverses arrays in dot-notation paths.
+- Unicode-aware case folding for case-insensitive matching.
+- Timestamp clamping in `process_event_at` to prevent overflow.
+- Memory leak in linter.
+
+### Performance
+
+- Pre-compiled regex patterns in pipeline conditions.
+- Eliminated hot-path cloning in correlation engine.
+- Eliminated `Vec` and `String` allocations in keyword matching.
+
+[v0.2.0](https://github.com/timescale/rsigma/commits/v0.2.0)
+
+## [0.1.0] - 2026-02-17
+
+Initial crates.io publish. Reserved the `rsigma` crate name with a minimal CLI binary (parser + evaluator only, no linter/LSP/pipelines/correlation). Superseded the same day by v0.2.0, which is the first feature-complete release.
+
+[0.11.0]: https://github.com/timescale/rsigma/releases/tag/v0.11.0
+[0.10.0]: https://github.com/timescale/rsigma/releases/tag/v0.10.0
+[0.9.0]: https://github.com/timescale/rsigma/releases/tag/v0.9.0
+[0.8.1]: https://github.com/timescale/rsigma/releases/tag/v0.8.1
+[0.8.0]: https://github.com/timescale/rsigma/releases/tag/v0.8.0
+[0.7.0]: https://github.com/timescale/rsigma/releases/tag/v0.7.0
+[0.6.0]: https://github.com/timescale/rsigma/releases/tag/v0.6.0
+[0.5.0]: https://github.com/timescale/rsigma/releases/tag/v0.5.0
+[0.4.0]: https://github.com/timescale/rsigma/releases/tag/v0.4.0
+[0.3.0]: https://github.com/timescale/rsigma/releases/tag/v0.3.0
+[0.2.0]: https://github.com/timescale/rsigma/releases/tag/v0.2.0
+[0.1.0]: https://crates.io/crates/rsigma/0.1.0
