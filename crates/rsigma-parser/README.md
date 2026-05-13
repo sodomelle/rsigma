@@ -361,6 +361,7 @@ The `schema_violation` lint rule optionally validates rules against a JSON schem
 | `Yaml` | serde_yaml parse failure |
 | `Condition` | Condition expression parse failure (PEG/Pratt); carries optional `SourceLocation` with line/column |
 | `UnknownModifier` | Unknown modifier in field spec |
+| `NotIsNotAModifier` | The literal string `\|not` was used as a modifier; Sigma expresses negation at the condition level (`condition: not selection`) or via `\|neq` for inequality. Surfaced with guidance on how to rewrite the rule |
 | `InvalidFieldSpec` | Invalid field specification |
 | `InvalidRule` | Document not a mapping, or invalid structure |
 | `MissingField` | Required field missing (e.g. `title`, `detection`) |

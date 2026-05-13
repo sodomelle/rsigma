@@ -24,6 +24,12 @@ This library is part of [rsigma].
 | `evaluate(event: &Event)` | Evaluate all rules against an event |
 | `evaluate_with_logsource(event, logsource)` | Evaluate with logsource-based pre-filtering |
 | `evaluate_batch(events: &[&Event])` | Evaluate all rules against multiple events (parallel with `parallel` feature) |
+| `set_bloom_prefilter(enabled: bool)` | Enable opt-in bloom-filter pre-filtering of positive substring matchers (off by default; see [Bloom Pre-Filter](#bloom-pre-filter-opt-in)) |
+| `bloom_prefilter_enabled()` | Whether bloom pre-filtering is currently enabled |
+| `set_bloom_max_bytes(max_bytes: usize)` | Override the bloom memory budget (default: 1 MB) |
+| `bloom_max_bytes()` | Configured bloom memory budget, or `None` if using the default |
+| `set_cross_rule_ac(enabled: bool)` | Enable opt-in cross-rule Aho-Corasick pre-filter (requires `daachorse-index` feature; see [Cross-Rule AC Index](#cross-rule-aho-corasick-index-opt-in-feature-gated)) |
+| `cross_rule_ac_enabled()` | Whether the cross-rule AC pre-filter is currently enabled (`daachorse-index` only) |
 | `rule_count()` | Number of loaded rules |
 | `rules()` | Access the compiled rules slice |
 
@@ -45,6 +51,9 @@ This library is part of [rsigma].
 | `state_count()` | Number of active correlation state entries |
 | `event_buffer_count()` | Total events stored across all buffers |
 | `event_buffer_bytes()` | Total bytes of compressed event data |
+| `set_bloom_prefilter(enabled: bool)` | Forward to the inner detection engine (off by default) |
+| `set_bloom_max_bytes(max_bytes: usize)` | Forward to the inner detection engine |
+| `set_cross_rule_ac(enabled: bool)` | Forward to the inner detection engine (requires `daachorse-index` feature) |
 
 ### Compilation
 
