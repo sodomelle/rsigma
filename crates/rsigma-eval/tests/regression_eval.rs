@@ -8,7 +8,7 @@
 //! files: the corpus is small enough that locality matters more than
 //! externalization, and a snapshot diff is easier to review in a PR.
 
-use rsigma_eval::{Engine, JsonEvent, MatchResult};
+use rsigma_eval::{Engine, JsonEvent, MatchResult, parse_pipeline};
 use rsigma_parser::parse_sigma_yaml;
 use serde_json::{Value, json};
 
@@ -289,4 +289,74 @@ level: medium
     engine.set_bloom_prefilter(false);
     let no_bloom = evaluate_corpus(&engine, &events);
     assert_eq!(no_bloom, expected);
+}
+
+#[test]
+fn optimizer_runs_after_pipeline_transformation() {
+    // A pipeline renames CommandLine -> process.command_line. The optimizer
+    // must see the post-pipeline field name, building the AhoCorasickSet
+    // for the transformed field. If the optimizer ran before the pipeline,
+    // the rule would still reference the original field and fail to match
+    // events with the ECS field name.
+    let yaml = r#"
+title: Post-Pipeline AC Check
+id: post-pipeline-ac
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection:
+        CommandLine|contains:
+            - 'whoami'
+            - 'mimikatz'
+            - 'powershell'
+            - 'invoke-expression'
+            - 'rundll32'
+            - 'regsvr32'
+            - 'certutil'
+            - 'bitsadmin'
+    condition: selection
+level: high
+"#;
+
+    let pipeline_yaml = r#"
+name: ECS Field Mapping
+priority: 10
+transformations:
+  - type: field_name_mapping
+    mapping:
+      CommandLine: process.command_line
+    rule_conditions:
+      - type: logsource
+        product: windows
+"#;
+
+    let collection = parse_sigma_yaml(yaml).expect("rules parse");
+    let pipeline = parse_pipeline(pipeline_yaml).expect("pipeline parse");
+
+    let mut engine = Engine::new_with_pipeline(pipeline);
+    engine.add_collection(&collection).expect("compile");
+
+    let events = vec![
+        // Uses ECS field name, should match via the renamed field.
+        json!({"process.command_line": "cmd /c whoami"}),
+        json!({"process.command_line": "MIMIKATZ.exe dump"}),
+        // Original field name should NOT match (pipeline renamed it).
+        json!({"CommandLine": "whoami"}),
+        // Unrelated field, no match.
+        json!({"Image": "notepad.exe"}),
+    ];
+    let actual = evaluate_corpus(&engine, &events);
+
+    let expected: Vec<Vec<String>> = vec![
+        vec!["Post-Pipeline AC Check".into()],
+        vec!["Post-Pipeline AC Check".into()],
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    ];
+
+    assert_eq!(
+        actual, expected,
+        "optimizer must run after pipeline field renaming"
+    );
 }

@@ -8,12 +8,13 @@
 //! from each `FieldSpec` and produces the appropriate `CompiledMatcher` variant.
 
 mod helpers;
-mod optimizer;
+#[doc(hidden)]
+pub mod optimizer;
 #[cfg(test)]
 mod tests;
 
-// Test-only re-export so equivalence proptests in other modules can drive
-// the optimizer directly.
+// Re-export so equivalence proptests in other modules and the fuzz target
+// can drive the optimizer directly.
 #[cfg(test)]
 pub(crate) use optimizer::optimize_any_of as optimize_any_of_for_test;
 

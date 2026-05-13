@@ -72,7 +72,7 @@ pub const REGEX_SET_THRESHOLD: usize = 3;
 /// 5. If all surviving children are pre-lowerable and there are >=
 ///    `CI_GROUP_THRESHOLD` of them, wrap the whole group in
 ///    `CaseInsensitiveGroup` (Any mode) to lower the haystack once.
-pub(crate) fn optimize_any_of(matchers: Vec<CompiledMatcher>) -> CompiledMatcher {
+pub fn optimize_any_of(matchers: Vec<CompiledMatcher>) -> CompiledMatcher {
     match matchers.len() {
         0 => return CompiledMatcher::AnyOf(Vec::new()),
         1 => {
