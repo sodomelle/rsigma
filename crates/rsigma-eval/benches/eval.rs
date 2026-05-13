@@ -276,6 +276,42 @@ fn bench_eval_ac_threshold_sweep(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Benchmark: many wildcard `|contains` patterns on a single field — exercises
+// the RegexSet batching path.
+// ---------------------------------------------------------------------------
+
+fn bench_eval_regex_set_heavy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("eval_regex_set_heavy");
+    group.sample_size(40);
+
+    let event_values = datagen::gen_event_values(1000);
+    let events: Vec<JsonEvent> = event_values.iter().map(JsonEvent::borrow).collect();
+
+    for n_patterns in [3, 5, 10, 20, 50] {
+        let yaml = datagen::gen_n_regex_set_heavy_rules(1, n_patterns);
+        let collection = parse_sigma_yaml(&yaml).unwrap();
+        let mut engine = rsigma_eval::Engine::new();
+        engine.add_collection(&collection).unwrap();
+
+        group.throughput(criterion::Throughput::Elements(events.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("patterns", n_patterns),
+            &(&engine, &events),
+            |b, (engine, events)| {
+                b.iter(|| {
+                    let mut total = 0usize;
+                    for event in *events {
+                        total += engine.evaluate(black_box(event)).len();
+                    }
+                    black_box(total);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark: regex-heavy rules
 // ---------------------------------------------------------------------------
 
@@ -321,6 +357,7 @@ criterion_group!(
     bench_eval_batch,
     bench_eval_contains_heavy,
     bench_eval_ac_threshold_sweep,
+    bench_eval_regex_set_heavy,
     bench_eval_wildcard_heavy,
     bench_eval_regex_heavy,
 );

@@ -1,9 +1,27 @@
+use regex::RegexSet;
+
 use super::helpers::{
     ascii_lowercase_cow, expand_template, extract_timestamp_part, match_cidr, match_numeric_value,
     match_str_value,
 };
 use super::{CompiledMatcher, GroupMode};
 use crate::event::{Event, EventValue};
+
+/// Reduce a [`RegexSet`] match against `s` according to `mode`.
+///
+/// `Any` short-circuits via [`RegexSet::is_match`]; `All` requires every
+/// pattern in the set to fire, so we materialize the matched-pattern bitset
+/// and check its population against the set length.
+#[inline]
+fn regex_set_matches(set: &RegexSet, mode: GroupMode, s: &str) -> bool {
+    match mode {
+        GroupMode::Any => set.is_match(s),
+        GroupMode::All => {
+            let hits = set.matches(s);
+            hits.iter().count() == set.len()
+        }
+    }
+}
 
 impl CompiledMatcher {
     /// Check if this matcher matches an [`EventValue`] from an event.
@@ -69,6 +87,10 @@ impl CompiledMatcher {
                     automaton.is_match(s)
                 }
             }),
+
+            CompiledMatcher::RegexSetMatch { set, mode } => {
+                match_str_value(value, |s| regex_set_matches(set, *mode, s))
+            }
 
             // -- Network --
             CompiledMatcher::Cidr(net) => match_cidr(value, net),
@@ -205,6 +227,9 @@ impl CompiledMatcher {
                 automaton,
                 case_insensitive: true,
             } => automaton.is_match(lowered_str),
+            CompiledMatcher::RegexSetMatch { set, mode } => {
+                regex_set_matches(set, *mode, lowered_str)
+            }
 
             CompiledMatcher::Not(inner) => !inner.matches_pre_lowered(lowered_str),
             CompiledMatcher::AnyOf(ms) => ms.iter().any(|m| m.matches_pre_lowered(lowered_str)),
@@ -282,6 +307,7 @@ impl CompiledMatcher {
                     automaton.is_match(s)
                 }
             }
+            CompiledMatcher::RegexSetMatch { set, mode } => regex_set_matches(set, *mode, s),
             CompiledMatcher::Not(inner) => !inner.matches_str(s),
             CompiledMatcher::AnyOf(matchers) => matchers.iter().any(|m| m.matches_str(s)),
             CompiledMatcher::AllOf(matchers) => matchers.iter().all(|m| m.matches_str(s)),

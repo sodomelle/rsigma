@@ -10,7 +10,7 @@ mod matching;
 pub use helpers::{ascii_lowercase_cow, parse_expand_template, sigma_string_to_regex};
 
 use aho_corasick::AhoCorasick;
-use regex::Regex;
+use regex::{Regex, RegexSet};
 
 use crate::event::Event;
 use ipnet::IpNet;
@@ -65,6 +65,21 @@ pub enum CompiledMatcher {
         automaton: AhoCorasick,
         case_insensitive: bool,
     },
+
+    /// Multi-pattern regex match via [`regex::RegexSet`].
+    ///
+    /// Built by the optimizer when an `AnyOf` group contains
+    /// `REGEX_SET_THRESHOLD` or more individual `Regex` matchers. Compiles
+    /// every pattern into a single combined DFA so one traversal of the
+    /// haystack tests all patterns at once.
+    ///
+    /// **Pattern reconstruction**: the optimizer rebuilds the set from each
+    /// matcher's [`Regex::as_str`], which preserves any inline flags the
+    /// compiler inlined (e.g. `(?i)`, `(?ims)`). This relies on the eval
+    /// crate's regex builder always inlining flags into the pattern string
+    /// rather than configuring them via `RegexBuilder`. A unit test guards
+    /// against future drift in that contract.
+    RegexSetMatch { set: RegexSet, mode: GroupMode },
 
     // -- Network --
     /// CIDR network match for IP addresses.
