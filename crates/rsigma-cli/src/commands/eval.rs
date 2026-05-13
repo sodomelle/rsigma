@@ -66,6 +66,7 @@ pub(crate) fn cmd_eval(
     syslog_tz: String,
     bloom_prefilter: bool,
     bloom_max_bytes: Option<usize>,
+    #[cfg(feature = "daachorse-index")] cross_rule_ac: bool,
 ) -> bool {
     let collection = crate::load_collection(&rules_path);
     let pipelines = crate::load_pipelines(&pipeline_paths);
@@ -108,6 +109,8 @@ pub(crate) fn cmd_eval(
             &syslog_tz,
             bloom_prefilter,
             bloom_max_bytes,
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac,
         )
     } else {
         cmd_eval_detection_only(
@@ -122,6 +125,8 @@ pub(crate) fn cmd_eval(
             &syslog_tz,
             bloom_prefilter,
             bloom_max_bytes,
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac,
         )
     }
 }
@@ -141,6 +146,7 @@ fn cmd_eval_with_correlations(
     syslog_tz_str: &str,
     bloom_prefilter: bool,
     bloom_max_bytes: Option<usize>,
+    #[cfg(feature = "daachorse-index")] cross_rule_ac: bool,
 ) -> bool {
     let mut engine = CorrelationEngine::new(config);
     engine.set_include_event(include_event);
@@ -148,6 +154,8 @@ fn cmd_eval_with_correlations(
         engine.set_bloom_max_bytes(budget);
     }
     engine.set_bloom_prefilter(bloom_prefilter);
+    #[cfg(feature = "daachorse-index")]
+    engine.set_cross_rule_ac(cross_rule_ac);
     for p in pipelines {
         engine.add_pipeline(p.clone());
     }
@@ -392,6 +400,7 @@ fn cmd_eval_detection_only(
     syslog_tz_str: &str,
     bloom_prefilter: bool,
     bloom_max_bytes: Option<usize>,
+    #[cfg(feature = "daachorse-index")] cross_rule_ac: bool,
 ) -> bool {
     let mut engine = Engine::new();
     engine.set_include_event(include_event);
@@ -399,6 +408,8 @@ fn cmd_eval_detection_only(
         engine.set_bloom_max_bytes(budget);
     }
     engine.set_bloom_prefilter(bloom_prefilter);
+    #[cfg(feature = "daachorse-index")]
+    engine.set_cross_rule_ac(cross_rule_ac);
     for p in pipelines {
         engine.add_pipeline(p.clone());
     }

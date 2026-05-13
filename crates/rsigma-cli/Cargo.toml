@@ -17,6 +17,7 @@ daemon-otlp = ["daemon", "rsigma-runtime/otlp", "prost", "tonic", "flate2", "tok
 logfmt = ["rsigma-runtime/logfmt"]
 cef = ["rsigma-runtime/cef"]
 evtx = ["rsigma-runtime/evtx"]
+daachorse-index = ["rsigma-eval/daachorse-index", "rsigma-runtime?/daachorse-index"]
 
 [dependencies]
 rsigma-parser = { path = "../rsigma-parser", version = "0.10.0" }

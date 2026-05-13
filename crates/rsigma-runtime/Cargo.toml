@@ -16,6 +16,7 @@ otlp = ["opentelemetry-proto", "prost"]
 logfmt = []
 cef = []
 evtx = ["dep:evtx"]
+daachorse-index = ["rsigma-eval/daachorse-index"]
 
 [dependencies]
 rsigma-parser = { path = "../rsigma-parser", version = "0.10.0" }

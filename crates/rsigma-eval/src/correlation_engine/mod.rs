@@ -117,6 +117,14 @@ impl CorrelationEngine {
         self.engine.set_bloom_max_bytes(max_bytes);
     }
 
+    /// Forward to [`crate::Engine::set_cross_rule_ac`] on the inner
+    /// detection engine. Off by default. Available behind the
+    /// `daachorse-index` Cargo feature.
+    #[cfg(feature = "daachorse-index")]
+    pub fn set_cross_rule_ac(&mut self, enabled: bool) {
+        self.engine.set_cross_rule_ac(enabled);
+    }
+
     /// Set the global correlation event mode.
     ///
     /// - `None`: no event storage (default)

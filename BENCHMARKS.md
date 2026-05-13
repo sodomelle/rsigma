@@ -111,6 +111,39 @@ Time to evaluate one event against N compiled rules.
 
 Wildcard/regex matching scales O(1) with rule count thanks to compiled pattern sets.
 
+### Aho-Corasick Threshold Sweep (0.10.0)
+
+Single rule with N `|contains` patterns evaluated against 50 randomly generated events at varying haystack lengths. Drove the choice of `AHO_CORASICK_THRESHOLD = 8` in `compiler/optimizer.rs`. Throughput is per event.
+
+| Patterns | h=100 B | h=1 KB | h=8 KB | h=64 KB |
+|---------:|---------|--------|--------|---------|
+| 1  | 13.0 Melem/s (3.84 us / batch) | 7.77 Melem/s (6.43 us) | 1.85 Melem/s (27.1 us) | 248 Kelem/s (201.4 us) |
+| 2  | 10.5 Melem/s (4.77 us) | 2.33 Melem/s (21.5 us) | 345 Kelem/s (144.8 us) | 42.3 Kelem/s (1.18 ms) |
+| 4  | 9.08 Melem/s (5.51 us) | 2.03 Melem/s (24.6 us) | 293 Kelem/s (170.8 us) | 35.6 Kelem/s (1.40 ms) |
+| **8**  | **5.17 Melem/s (9.68 us)** | **620 Kelem/s (80.6 us)** | **79.0 Kelem/s (633.1 us)** | **9.76 Kelem/s (5.12 ms)** |
+| 16 | 5.19 Melem/s (9.63 us) | 628 Kelem/s (79.6 us) | 78.6 Kelem/s (636.4 us) | 9.67 Kelem/s (5.17 ms) |
+| 32 | 4.99 Melem/s (10.0 us) | 607 Kelem/s (82.3 us) | 76.4 Kelem/s (654.4 us) | 8.88 Kelem/s (5.63 ms) |
+
+Throughput flattens at p=8: p16 and p32 perform within ~3% of p8 because the AC automaton scans the haystack once regardless of pattern count. Below 8 patterns, the sequential `str::contains` path with SIMD acceleration (memchr / Two-Way) wins. The crossover is clearly at 8.
+
+Run with `cargo bench -p rsigma-eval --bench eval -- eval_ac_threshold_sweep`.
+
+### Cross-Rule Aho-Corasick Pre-Filter, `daachorse-index` feature (0.10.0)
+
+200 non-matching events evaluated against N pure-substring rules. Best-case workload for the cross-rule index: every rule is AC-prunable (every detection consists exclusively of positive substring matchers, no negation in conditions), and every event has zero pattern hits across all fields.
+
+| Rules  | Off (default)            | On (`set_cross_rule_ac(true)`)   | Speedup     |
+|-------:|--------------------------|----------------------------------|-------------|
+| 1,000  | 17.34 ms (11.5 Kelem/s)  | 253.0 us (790 Kelem/s)           | **~68x**    |
+| 5,000  | 85.51 ms (2.34 Kelem/s)  | 883.0 us (226 Kelem/s)           | **~97x**    |
+| 10,000 | 173.37 ms (1.15 Kelem/s) | 1.71 ms (117 Kelem/s)            | **~101x**   |
+
+The cross-rule index turns O(rules × patterns) per event into O(haystack_length) for the AC scan, so throughput is essentially constant in rule count once the index is enabled.
+
+For typical mixed workloads (substring + exact + regex rules, events that hit multiple fields, smaller rule sets) the index adds build-time and lookup overhead with smaller wins or none, and can even cause a slowdown. **Off by default.** Enable via `Engine::set_cross_rule_ac(true)` programmatically, or `--cross-rule-ac` on `rsigma daemon` / `rsigma eval` (requires the `daachorse-index` Cargo feature). Always benchmark against representative data before flipping it on.
+
+Run with `cargo bench -p rsigma-eval --features daachorse-index --bench eval -- eval_cross_rule_ac`.
+
 ---
 
 ## Correlation Engine (`rsigma-eval`)
@@ -266,6 +299,8 @@ Full pipeline: resolve source, expand templates, apply value_placeholders, evalu
 
 ## Key Observations
 
+- **AC threshold is empirically 8**: substring-list throughput flattens at 8 patterns once Aho-Corasick takes over. p16/p32 perform within ~3% of p8; below 8, the sequential `str::contains` SIMD path (memchr / Two-Way) is faster.
+- **Cross-rule AC is order-of-magnitude on substring-only rule sets**: with the `daachorse-index` feature enabled, 200 non-matching events against 10K pure-substring rules dropped from 173 ms to 1.71 ms (~101x). Off by default; only worth enabling for substring-heavy rule sets where most events don't match (e.g., threat-intel feeds against high-volume telemetry).
 - **Detection is fast**: ~400K events/sec with 100 rules in pure evaluation mode, scaling linearly with event count.
 - **Runtime overhead is negative**: LogProcessor with JSON batching is actually faster than raw Engine evaluation due to batch-level optimizations and format-aware parsing.
 - **Rule count scales well**: Increasing from 100 to 1000 rules has minimal per-event cost increase (~50%) thanks to indexed field matching.

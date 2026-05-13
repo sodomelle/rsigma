@@ -95,6 +95,12 @@ pub struct DaemonConfig {
     /// Optional override for the bloom memory budget (bytes). `None` means
     /// the crate default (1 MB).
     pub bloom_max_bytes: Option<usize>,
+    /// Enable the cross-rule Aho-Corasick pre-filter. Off by default;
+    /// benefit is workload-dependent (large rule sets with shared
+    /// substring patterns). Available behind the `daachorse-index`
+    /// Cargo feature.
+    #[cfg(feature = "daachorse-index")]
+    pub cross_rule_ac: bool,
 }
 
 pub async fn run_daemon(config: DaemonConfig) {
@@ -123,6 +129,8 @@ pub async fn run_daemon(config: DaemonConfig) {
     if let Some(budget) = config.bloom_max_bytes {
         engine.set_bloom_max_bytes(budget);
     }
+    #[cfg(feature = "daachorse-index")]
+    engine.set_cross_rule_ac(config.cross_rule_ac);
 
     // Set up dynamic source resolver if any pipeline has dynamic sources
     let has_dynamic = config.pipelines.iter().any(|p| p.is_dynamic());

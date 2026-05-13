@@ -5,6 +5,8 @@
 //! reduce the number of rules evaluated per event.
 
 pub(crate) mod bloom_index;
+#[cfg(feature = "daachorse-index")]
+pub(crate) mod cross_rule_ac;
 mod filters;
 #[cfg(test)]
 mod tests;
@@ -88,6 +90,27 @@ pub struct Engine {
     /// per-field filters. `None` means use the crate default
     /// (`bloom_index::DEFAULT_MAX_TOTAL_BYTES`, 1 MB).
     bloom_max_bytes: Option<usize>,
+    /// Cross-rule Aho-Corasick index for substring patterns, gated on the
+    /// `daachorse-index` feature. Built only when [`cross_rule_ac_enabled`]
+    /// is `true`; [`cross_rule_ac_prunable`] is the conservative per-rule
+    /// flag computed at the same time so the `evaluate` hot path can drop
+    /// rules safely.
+    ///
+    /// [`cross_rule_ac_enabled`]: Self::cross_rule_ac_enabled
+    /// [`cross_rule_ac_prunable`]: Self::cross_rule_ac_prunable
+    #[cfg(feature = "daachorse-index")]
+    cross_rule_ac_index: cross_rule_ac::CrossRuleAcIndex,
+    /// Toggle for the cross-rule AC pre-filter. Off by default; the index
+    /// only pays off on rule sets > 5K rules with many shared substring
+    /// patterns. See [`Engine::set_cross_rule_ac`].
+    #[cfg(feature = "daachorse-index")]
+    cross_rule_ac_enabled: bool,
+    /// Per-rule conservative AC-prunability flag. `true` iff the rule's
+    /// firing requires at least one positive substring match (no `Exact`,
+    /// `Regex`, `Numeric`, `Not`, etc.), so dropping the rule on a
+    /// "no AC hit" verdict is provably correct.
+    #[cfg(feature = "daachorse-index")]
+    cross_rule_ac_prunable: Vec<bool>,
 }
 
 impl Engine {
@@ -102,6 +125,12 @@ impl Engine {
             bloom_index: FieldBloomIndex::empty(),
             bloom_prefilter: false,
             bloom_max_bytes: None,
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac_index: cross_rule_ac::CrossRuleAcIndex::empty(),
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac_enabled: false,
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac_prunable: Vec::new(),
         }
     }
 
@@ -116,6 +145,12 @@ impl Engine {
             bloom_index: FieldBloomIndex::empty(),
             bloom_prefilter: false,
             bloom_max_bytes: None,
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac_index: cross_rule_ac::CrossRuleAcIndex::empty(),
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac_enabled: false,
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac_prunable: Vec::new(),
         }
     }
 
@@ -161,6 +196,38 @@ impl Engine {
     /// explicitly. `None` means the crate default (1 MB) is in use.
     pub fn bloom_max_bytes(&self) -> Option<usize> {
         self.bloom_max_bytes
+    }
+
+    /// Enable or disable the cross-rule Aho-Corasick pre-filter.
+    ///
+    /// When enabled, the engine builds a single per-field
+    /// `DoubleArrayAhoCorasick` automaton over every positive substring
+    /// needle from every rule and drops AC-prunable rules from the
+    /// candidate set when none of their patterns hit the event.
+    ///
+    /// Off by default. Pays off on large rule sets (> ~5K rules) with many
+    /// shared substring patterns (threat-intel feeds, IOC packs). For
+    /// smaller rule sets the per-rule [`AhoCorasickSet`] matcher already
+    /// handles the workload optimally; the cross-rule index only adds
+    /// build-time and lookup overhead. Benchmark with `eval_cross_rule_ac`
+    /// against representative rule sets before enabling in production.
+    ///
+    /// Available behind the `daachorse-index` Cargo feature.
+    ///
+    /// [`AhoCorasickSet`]: crate::matcher::CompiledMatcher::AhoCorasickSet
+    #[cfg(feature = "daachorse-index")]
+    pub fn set_cross_rule_ac(&mut self, enabled: bool) {
+        self.cross_rule_ac_enabled = enabled;
+        if enabled && !self.rules.is_empty() {
+            self.rebuild_index();
+        }
+    }
+
+    /// Returns whether the cross-rule AC pre-filter is currently enabled.
+    /// Available behind the `daachorse-index` Cargo feature.
+    #[cfg(feature = "daachorse-index")]
+    pub fn cross_rule_ac_enabled(&self) -> bool {
+        self.cross_rule_ac_enabled
     }
 
     /// Set global `include_event` — when `true`, all match results include
@@ -342,6 +409,20 @@ impl Engine {
             Some(budget) => FieldBloomIndex::build_with_budget(&self.rules, budget),
             None => FieldBloomIndex::build(&self.rules),
         };
+        #[cfg(feature = "daachorse-index")]
+        {
+            if self.cross_rule_ac_enabled {
+                self.cross_rule_ac_index = cross_rule_ac::CrossRuleAcIndex::build(&self.rules);
+                self.cross_rule_ac_prunable = self
+                    .rules
+                    .iter()
+                    .map(cross_rule_ac::rule_is_ac_prunable)
+                    .collect();
+            } else {
+                self.cross_rule_ac_index = cross_rule_ac::CrossRuleAcIndex::empty();
+                self.cross_rule_ac_prunable.clear();
+            }
+        }
     }
 
     /// Evaluate an event against candidate rules using the inverted index.
@@ -353,12 +434,52 @@ impl Engine {
         }
     }
 
+    /// Build the cross-rule AC keep-mask for `event`, or `None` when the
+    /// cross-rule index is disabled or empty (no filtering needed).
+    ///
+    /// `Some(mask)` answers "should this rule survive the cross-rule AC
+    /// filter": `mask[idx] = true` means keep, `false` means drop.
+    /// Non-AC-prunable rules are always kept.
+    #[cfg(feature = "daachorse-index")]
+    fn cross_rule_ac_keep_mask<E: Event>(&self, event: &E) -> Option<Vec<bool>> {
+        if !self.cross_rule_ac_enabled || self.cross_rule_ac_index.is_empty() {
+            return None;
+        }
+        let mut hits = vec![false; self.rules.len()];
+        self.cross_rule_ac_index.mark_hits(event, &mut hits);
+        // Compose: keep = !ac_prunable OR ac_hit. The prunable vector and
+        // the rule slice are kept aligned by `rebuild_index`.
+        for (idx, slot) in hits.iter_mut().enumerate() {
+            if !self
+                .cross_rule_ac_prunable
+                .get(idx)
+                .copied()
+                .unwrap_or(false)
+            {
+                *slot = true;
+            }
+        }
+        Some(hits)
+    }
+
+    #[cfg(not(feature = "daachorse-index"))]
+    #[inline(always)]
+    fn cross_rule_ac_keep_mask<E: Event>(&self, _event: &E) -> Option<Vec<bool>> {
+        None
+    }
+
     fn evaluate_no_bloom_path<E: Event>(&self, event: &E) -> Vec<MatchResult> {
         // The public `evaluate_rule` is not generic over `BloomLookup`, so
         // the no-bloom hot path lowers to straight-line code identical to
         // the pre-bloom engine.
+        let keep = self.cross_rule_ac_keep_mask(event);
         let mut results = Vec::new();
         for idx in self.rule_index.candidates(event) {
+            if let Some(ref mask) = keep
+                && !mask[idx]
+            {
+                continue;
+            }
             let rule = &self.rules[idx];
             if let Some(mut m) = evaluate_rule(rule, event) {
                 if self.include_event && m.event.is_none() {
@@ -372,8 +493,14 @@ impl Engine {
 
     fn evaluate_with_bloom_path<E: Event>(&self, event: &E) -> Vec<MatchResult> {
         let bloom = BloomCache::new(&self.bloom_index, event);
+        let keep = self.cross_rule_ac_keep_mask(event);
         let mut results = Vec::new();
         for idx in self.rule_index.candidates(event) {
+            if let Some(ref mask) = keep
+                && !mask[idx]
+            {
+                continue;
+            }
             let rule = &self.rules[idx];
             if let Some(mut m) = evaluate_rule_with_bloom(rule, event, &bloom) {
                 if self.include_event && m.event.is_none() {
@@ -407,8 +534,14 @@ impl Engine {
         event: &E,
         event_logsource: &LogSource,
     ) -> Vec<MatchResult> {
+        let keep = self.cross_rule_ac_keep_mask(event);
         let mut results = Vec::new();
         for idx in self.rule_index.candidates(event) {
+            if let Some(ref mask) = keep
+                && !mask[idx]
+            {
+                continue;
+            }
             let rule = &self.rules[idx];
             if logsource_matches(&rule.logsource, event_logsource)
                 && let Some(mut m) = evaluate_rule(rule, event)
@@ -428,8 +561,14 @@ impl Engine {
         event_logsource: &LogSource,
     ) -> Vec<MatchResult> {
         let bloom = BloomCache::new(&self.bloom_index, event);
+        let keep = self.cross_rule_ac_keep_mask(event);
         let mut results = Vec::new();
         for idx in self.rule_index.candidates(event) {
+            if let Some(ref mask) = keep
+                && !mask[idx]
+            {
+                continue;
+            }
             let rule = &self.rules[idx];
             if logsource_matches(&rule.logsource, event_logsource)
                 && let Some(mut m) = evaluate_rule_with_bloom(rule, event, &bloom)

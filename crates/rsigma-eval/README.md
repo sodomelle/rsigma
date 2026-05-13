@@ -24,6 +24,12 @@ This library is part of [rsigma].
 | `evaluate(event: &Event)` | Evaluate all rules against an event |
 | `evaluate_with_logsource(event, logsource)` | Evaluate with logsource-based pre-filtering |
 | `evaluate_batch(events: &[&Event])` | Evaluate all rules against multiple events (parallel with `parallel` feature) |
+| `set_bloom_prefilter(enabled: bool)` | Enable opt-in bloom-filter pre-filtering of positive substring matchers (off by default; see [Bloom Pre-Filter](#bloom-pre-filter-opt-in)) |
+| `bloom_prefilter_enabled()` | Whether bloom pre-filtering is currently enabled |
+| `set_bloom_max_bytes(max_bytes: usize)` | Override the bloom memory budget (default: 1 MB) |
+| `bloom_max_bytes()` | Configured bloom memory budget, or `None` if using the default |
+| `set_cross_rule_ac(enabled: bool)` | Enable opt-in cross-rule Aho-Corasick pre-filter (requires `daachorse-index` feature; see [Cross-Rule AC Index](#cross-rule-aho-corasick-index-opt-in-feature-gated)) |
+| `cross_rule_ac_enabled()` | Whether the cross-rule AC pre-filter is currently enabled (`daachorse-index` only) |
 | `rule_count()` | Number of loaded rules |
 | `rules()` | Access the compiled rules slice |
 
@@ -45,6 +51,9 @@ This library is part of [rsigma].
 | `state_count()` | Number of active correlation state entries |
 | `event_buffer_count()` | Total events stored across all buffers |
 | `event_buffer_bytes()` | Total bytes of compressed event data |
+| `set_bloom_prefilter(enabled: bool)` | Forward to the inner detection engine (off by default) |
+| `set_bloom_max_bytes(max_bytes: usize)` | Forward to the inner detection engine |
+| `set_cross_rule_ac(enabled: bool)` | Forward to the inner detection engine (requires `daachorse-index` feature) |
 
 ### Compilation
 
@@ -387,6 +396,40 @@ CLI equivalents on `rsigma eval` and `rsigma daemon`:
 ```
 
 Always benchmark against representative events before flipping it on; the `eval_bloom_rejection` Criterion group in `crates/rsigma-eval/benches/eval.rs` reports throughput with both default-off and bloom-on engines so you can size the win on your corpus.
+
+## Cross-Rule Aho-Corasick Index (Opt-In, Feature-Gated)
+
+For deployments with very large rule sets (> ~5K rules) and many shared substring patterns (threat-intel feeds, IOC packs), the engine can build a single per-field [`DoubleArrayAhoCorasick`](https://crates.io/crates/daachorse) automaton over every rule's positive substring needles. At eval time, the engine scans each indexed field once with the per-field automaton and drops AC-prunable rules from the candidate set when none of their patterns hit the event.
+
+A rule is AC-prunable when:
+
+- It has at least one positive substring detection item, AND
+- Every detection consists exclusively of positive substring matchers (`Contains` / `StartsWith` / `EndsWith` / `AhoCorasickSet`, possibly nested under `AnyOf`/`AllOf`/`CaseInsensitiveGroup`), AND
+- No condition expression contains `Not`.
+
+These rules can be safely pruned because their firing requires at least one substring to match. Rules with `Exact`, `Regex`, `Numeric`, `Cidr`, etc. matchers, or with `not` selectors in their conditions, are kept in the candidate set unfiltered.
+
+**Off by default.** For smaller rule sets the per-rule [`AhoCorasickSet`] matcher is already optimal; the cross-rule index only adds build time and lookup overhead. Pattern count per field is capped at 100K (rules referencing fields above that cap are kept unfiltered). Build time scales linearly with total pattern count.
+
+Enable via the `daachorse-index` Cargo feature:
+
+```toml
+rsigma-eval = { version = "0.10", features = ["daachorse-index"] }
+```
+
+```rust
+let mut engine = Engine::new();
+engine.set_cross_rule_ac(true);
+engine.add_collection(&collection)?;
+```
+
+CLI equivalents on `rsigma eval` and `rsigma daemon` (when the CLI is compiled with the feature):
+
+```
+--cross-rule-ac
+```
+
+Always benchmark against representative rule sets and event streams before flipping it on; the `eval_cross_rule_ac` Criterion group reports throughput at 1K / 5K / 10K rules with the index on and off.
 
 ## Constants and Limits
 

@@ -11,6 +11,7 @@ homepage.workspace = true
 
 [features]
 parallel = ["rayon"]
+daachorse-index = ["dep:daachorse"]
 
 [dependencies]
 rsigma-parser = { path = "../rsigma-parser", version = "0.10.0" }
@@ -27,6 +28,7 @@ chrono = { version = "0.4", features = ["serde"] }
 flate2 = "1"
 log = "0.4"
 rayon = { version = "1", optional = true }
+daachorse = { version = "3", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"

@@ -147,6 +147,7 @@ Unlike `eval`, the daemon stays alive after stdin reaches EOF and supports hot-r
 | `--timestamp-field` | repeatable | `[]` | Event field(s) for timestamp extraction |
 | `--bloom-prefilter` | flag | `false` | Enable bloom-filter pre-filtering of positive substring matchers (workload-dependent; see `crates/rsigma-eval/README.md`) |
 | `--bloom-max-bytes` | integer | **1048576** | Memory budget for the bloom index (no effect without `--bloom-prefilter`) |
+| `--cross-rule-ac` | flag | `false` | Enable cross-rule Aho-Corasick pre-filter (requires `--features daachorse-index`; see `crates/rsigma-eval/README.md`) |
 | `--buffer-size` | integer | **10000** | Bounded channel capacity for source-to-engine and engine-to-sink queues |
 | `--batch-size` | integer | **1** | Maximum events per engine lock acquisition (reduces mutex overhead under load) |
 | `--drain-timeout` | integer | **5** | Seconds to wait for in-flight events to drain on shutdown |
@@ -376,6 +377,7 @@ Evaluate JSON events against Sigma detection and correlation rules.
 | `--fail-on-detection` | flag | `false` | Exit with code 1 when any detection or correlation fires. Useful for CI/CD pipelines |
 | `--bloom-prefilter` | flag | `false` | Enable bloom-filter pre-filtering of positive substring matchers (see `crates/rsigma-eval/README.md` for the trade-off) |
 | `--bloom-max-bytes` | integer | **1048576** | Memory budget for the bloom index (no effect without `--bloom-prefilter`) |
+| `--cross-rule-ac` | flag | `false` | Enable cross-rule Aho-Corasick pre-filter (requires `--features daachorse-index`; see `crates/rsigma-eval/README.md`) |
 
 \* Feature-gated: `logfmt` requires the `logfmt` feature, `cef` requires the `cef` feature, `evtx` requires the `evtx` feature.
 
@@ -932,10 +934,11 @@ Resolved values are cached in memory (and optionally SQLite). The cache supports
 | `logfmt` | off | Enables `logfmt` input format in `daemon` and `eval` |
 | `cef` | off | Enables CEF (ArcSight) input format in `daemon` and `eval` |
 | `evtx` | off | Enables EVTX (Windows Event Log) input format |
+| `daachorse-index` | off | Enables the `--cross-rule-ac` flag and links in [daachorse](https://crates.io/crates/daachorse) for cross-rule Aho-Corasick pre-filtering of large substring-heavy rule sets |
 
 ```bash
 # Build with all features
-cargo build --release --features daemon-nats,daemon-otlp,logfmt,cef,evtx
+cargo build --release --features daemon-nats,daemon-otlp,logfmt,cef,evtx,daachorse-index
 
 # Build without daemon (parser, eval, convert, lint only)
 cargo build --release --no-default-features

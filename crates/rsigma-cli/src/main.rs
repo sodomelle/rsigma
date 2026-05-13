@@ -342,6 +342,23 @@ enum Commands {
         /// `--bloom-prefilter` is set.
         #[arg(long = "bloom-max-bytes")]
         bloom_max_bytes: Option<usize>,
+
+        /// Enable the cross-rule Aho-Corasick pre-filter (daachorse-index).
+        ///
+        /// Off by default. When enabled, the engine builds a single
+        /// per-field `DoubleArrayAhoCorasick` over every rule's positive
+        /// substring needles and drops AC-prunable rules (pure positive
+        /// substring detections, no negation) from the candidate set when
+        /// none of their patterns match the event. Pays off only on rule
+        /// sets > ~5K rules with many shared substring patterns
+        /// (threat-intel feeds, IOC packs). For smaller rule sets the
+        /// per-rule Aho-Corasick matcher is already optimal. Build time
+        /// scales linearly with total pattern count; pattern count per
+        /// field is capped at 100K. Available when compiled with the
+        /// `daachorse-index` Cargo feature.
+        #[cfg(feature = "daachorse-index")]
+        #[arg(long = "cross-rule-ac")]
+        cross_rule_ac: bool,
     },
 
     /// Evaluate events against Sigma rules
@@ -449,6 +466,13 @@ enum Commands {
         /// No effect unless `--bloom-prefilter` is set.
         #[arg(long = "bloom-max-bytes")]
         bloom_max_bytes: Option<usize>,
+
+        /// Enable the cross-rule Aho-Corasick pre-filter (daachorse-index).
+        /// See `rsigma daemon --help` for the trade-off. Available when
+        /// compiled with the `daachorse-index` Cargo feature.
+        #[cfg(feature = "daachorse-index")]
+        #[arg(long = "cross-rule-ac")]
+        cross_rule_ac: bool,
     },
 
     /// Convert Sigma rules to backend-native queries
@@ -601,6 +625,8 @@ fn main() {
             allow_remote_include,
             bloom_prefilter,
             bloom_max_bytes,
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac,
         } => {
             #[cfg(feature = "daemon-nats")]
             let nats_auth = NatsAuthArgs {
@@ -673,6 +699,8 @@ fn main() {
                 allow_remote_include,
                 bloom_prefilter,
                 bloom_max_bytes,
+                #[cfg(feature = "daachorse-index")]
+                cross_rule_ac,
             )
         }
         Commands::Parse { path, pretty } => commands::cmd_parse(path, pretty),
@@ -733,6 +761,8 @@ fn main() {
             fail_on_detection,
             bloom_prefilter,
             bloom_max_bytes,
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac,
         } => {
             let had_matches = commands::cmd_eval(
                 rules,
@@ -752,6 +782,8 @@ fn main() {
                 syslog_tz,
                 bloom_prefilter,
                 bloom_max_bytes,
+                #[cfg(feature = "daachorse-index")]
+                cross_rule_ac,
             );
             if fail_on_detection && had_matches {
                 process::exit(exit_code::FINDINGS);
@@ -843,6 +875,7 @@ fn cmd_daemon(
     allow_remote_include: bool,
     bloom_prefilter: bool,
     bloom_max_bytes: Option<usize>,
+    #[cfg(feature = "daachorse-index")] cross_rule_ac: bool,
 ) {
     // Set up structured logging
     tracing_subscriber::fmt()
@@ -919,6 +952,8 @@ fn cmd_daemon(
         allow_remote_include,
         bloom_prefilter,
         bloom_max_bytes,
+        #[cfg(feature = "daachorse-index")]
+        cross_rule_ac,
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()

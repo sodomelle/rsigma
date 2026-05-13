@@ -373,6 +373,68 @@ fn bench_eval_bloom_rejection(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Benchmark: cross-rule Aho-Corasick prefilter (daachorse-index feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "daachorse-index")]
+fn bench_eval_cross_rule_ac(c: &mut Criterion) {
+    let mut group = c.benchmark_group("eval_cross_rule_ac");
+    group.sample_size(20);
+
+    // Pure-substring rules amplify the cross-rule index's win because every
+    // rule is AC-prunable and shares the same field. Mix non-matching
+    // events with a small fraction of matches to model a typical
+    // threat-intel deployment where most events are benign.
+    let event_values = datagen::gen_non_matching_events(200);
+    let events: Vec<JsonEvent> = event_values.iter().map(JsonEvent::borrow).collect();
+
+    for n_rules in [1_000usize, 5_000, 10_000] {
+        let yaml = datagen::gen_n_substring_only_rules(n_rules);
+        let collection = parse_sigma_yaml(&yaml).unwrap();
+
+        let mut off_engine = Engine::new();
+        off_engine.add_collection(&collection).unwrap();
+
+        let mut on_engine = Engine::new();
+        on_engine.set_cross_rule_ac(true);
+        on_engine.add_collection(&collection).unwrap();
+
+        group.throughput(criterion::Throughput::Elements(events.len() as u64));
+
+        let off_label = format!("{n_rules}r_off");
+        group.bench_with_input(
+            BenchmarkId::new("default", &off_label),
+            &(&off_engine, &events),
+            |b, (engine, events)| {
+                b.iter(|| {
+                    let mut total = 0usize;
+                    for event in *events {
+                        total += engine.evaluate(black_box(event)).len();
+                    }
+                    black_box(total);
+                });
+            },
+        );
+
+        let on_label = format!("{n_rules}r_on");
+        group.bench_with_input(
+            BenchmarkId::new("cross_rule_ac", &on_label),
+            &(&on_engine, &events),
+            |b, (engine, events)| {
+                b.iter(|| {
+                    let mut total = 0usize;
+                    for event in *events {
+                        total += engine.evaluate(black_box(event)).len();
+                    }
+                    black_box(total);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark: regex-heavy rules
 // ---------------------------------------------------------------------------
 
@@ -410,6 +472,23 @@ fn bench_eval_regex_heavy(c: &mut Criterion) {
 // Criterion harness
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "daachorse-index")]
+criterion_group!(
+    benches,
+    bench_compile_rules,
+    bench_eval_single_event,
+    bench_eval_throughput,
+    bench_eval_batch,
+    bench_eval_contains_heavy,
+    bench_eval_ac_threshold_sweep,
+    bench_eval_regex_set_heavy,
+    bench_eval_bloom_rejection,
+    bench_eval_cross_rule_ac,
+    bench_eval_wildcard_heavy,
+    bench_eval_regex_heavy,
+);
+
+#[cfg(not(feature = "daachorse-index"))]
 criterion_group!(
     benches,
     bench_compile_rules,

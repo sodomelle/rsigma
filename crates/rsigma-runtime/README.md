@@ -134,6 +134,7 @@ let expanded_pipeline = TemplateExpander::expand(&pipeline, &resolved_map);
 | `evtx` | Enable EVTX (Windows Event Log) input adapter. Provides `EvtxFileReader` for reading `.evtx` files and iterating records as `serde_json::Value` |
 | `nats` | Enable NATS JetStream source and sink, NATS dynamic sources, and NATS control subject |
 | `otlp` | Enable OTLP log ingestion types and `LogRecord`-to-JSON conversion |
+| `daachorse-index` | Forward to `rsigma-eval/daachorse-index`. Enables `RuntimeEngine::set_cross_rule_ac` and the cross-rule Aho-Corasick pre-filter for large substring-heavy rule sets |
 
 ## License
 

@@ -27,10 +27,15 @@ pub struct RuntimeEngine {
     /// Optional override for the bloom memory budget in bytes. `None`
     /// means use the eval crate default.
     bloom_max_bytes: Option<usize>,
+    /// Opt-in cross-rule Aho-Corasick pre-filter. Forwarded to the inner
+    /// detection engine on every rule reload. Available behind the
+    /// `daachorse-index` Cargo feature.
+    #[cfg(feature = "daachorse-index")]
+    cross_rule_ac: bool,
 }
 
 enum EngineVariant {
-    DetectionOnly(Engine),
+    DetectionOnly(Box<Engine>),
     WithCorrelations(Box<CorrelationEngine>),
 }
 
@@ -49,7 +54,7 @@ impl RuntimeEngine {
         include_event: bool,
     ) -> Self {
         RuntimeEngine {
-            engine: EngineVariant::DetectionOnly(Engine::new()),
+            engine: EngineVariant::DetectionOnly(Box::new(Engine::new())),
             pipelines,
             pipeline_paths: Vec::new(),
             rules_path,
@@ -59,6 +64,8 @@ impl RuntimeEngine {
             allow_remote_include: false,
             bloom_prefilter: false,
             bloom_max_bytes: None,
+            #[cfg(feature = "daachorse-index")]
+            cross_rule_ac: false,
         }
     }
 
@@ -73,6 +80,17 @@ impl RuntimeEngine {
     /// Applies on the next `load_rules()`.
     pub fn set_bloom_max_bytes(&mut self, max_bytes: usize) {
         self.bloom_max_bytes = Some(max_bytes);
+    }
+
+    /// Enable or disable the cross-rule Aho-Corasick pre-filter on the
+    /// inner detection engine. Off by default; the optimization helps only
+    /// on substring-heavy rule sets > ~5K rules. Applies on the next
+    /// `load_rules()`.
+    ///
+    /// Available behind the `daachorse-index` Cargo feature.
+    #[cfg(feature = "daachorse-index")]
+    pub fn set_cross_rule_ac(&mut self, enabled: bool) {
+        self.cross_rule_ac = enabled;
     }
 
     /// Set a source resolver for dynamic pipeline sources.
@@ -202,6 +220,8 @@ impl RuntimeEngine {
                 engine.set_bloom_max_bytes(budget);
             }
             engine.set_bloom_prefilter(self.bloom_prefilter);
+            #[cfg(feature = "daachorse-index")]
+            engine.set_cross_rule_ac(self.cross_rule_ac);
             for p in &self.pipelines {
                 engine.add_pipeline(p.clone());
             }
@@ -227,6 +247,8 @@ impl RuntimeEngine {
                 engine.set_bloom_max_bytes(budget);
             }
             engine.set_bloom_prefilter(self.bloom_prefilter);
+            #[cfg(feature = "daachorse-index")]
+            engine.set_cross_rule_ac(self.cross_rule_ac);
             for p in &self.pipelines {
                 engine.add_pipeline(p.clone());
             }
@@ -239,7 +261,7 @@ impl RuntimeEngine {
                 correlation_rules: 0,
                 state_entries: 0,
             };
-            self.engine = EngineVariant::DetectionOnly(engine);
+            self.engine = EngineVariant::DetectionOnly(Box::new(engine));
             Ok(stats)
         }
     }

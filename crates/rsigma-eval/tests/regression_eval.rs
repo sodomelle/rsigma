@@ -360,3 +360,100 @@ transformations:
         "optimizer must run after pipeline field renaming"
     );
 }
+
+#[cfg(feature = "daachorse-index")]
+#[test]
+fn cross_rule_ac_preserves_match_results() {
+    // The cross-rule AC pre-filter is purely an optimization: enabling or
+    // disabling it must never change which rules fire on any event. This
+    // mirrors the bloom prefilter parity test for Phase 4.
+    let mut engine = engine_from(CONTAINS_HEAVY_RULES);
+
+    let events = vec![
+        json!({"EventType": "login", "Image": "C:/Windows/System32/explorer.exe"}),
+        json!({"Image": "C:/Tools/MIMIKATZ.exe", "CommandLine": "mimikatz.exe sekurlsa::logonpasswords"}),
+        json!({"Image": "C:/Windows/System32/powershell.exe", "CommandLine": "powershell.exe -enc aHR0cHM6Ly9ldmls"}),
+        json!({"Image": "/usr/bin/whoami", "CommandLine": "whoami /all"}),
+        json!({"Image": "/usr/bin/notepad.exe", "CommandLine": "notepad readme.txt"}),
+        // Pure-digit event: no positive substring patterns can hit, the
+        // cross-rule AC should drop AC-prunable rules; non-prunable rules
+        // (mixed with exact items) must still be evaluated.
+        json!({"Image": "0000000000", "CommandLine": "0000111122223333"}),
+        json!({}),
+    ];
+
+    let no_ac = evaluate_corpus(&engine, &events);
+
+    engine.set_cross_rule_ac(true);
+    let with_ac = evaluate_corpus(&engine, &events);
+
+    assert_eq!(no_ac, with_ac, "cross-rule AC changed match output");
+}
+
+#[cfg(feature = "daachorse-index")]
+#[test]
+fn cross_rule_ac_handles_negation_in_condition() {
+    // A rule with `not other` in its condition must NOT be classified as
+    // AC-prunable: dropping it on "no AC hit" would change semantics
+    // (the rule fires when the substring is absent).
+    let yaml = r#"
+title: Selection Without Substring
+id: selection-without-substring
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection:
+        EventType: 'process_create'
+    other:
+        CommandLine|contains: 'whoami'
+    condition: selection and not other
+level: medium
+"#;
+    let mut engine = engine_from(yaml);
+    engine.set_cross_rule_ac(true);
+
+    let events = vec![
+        // No 'whoami' in CommandLine; rule fires because `not other` is true.
+        json!({"EventType": "process_create", "CommandLine": "notepad foo"}),
+        // 'whoami' present; rule does NOT fire (other is true, negated to false).
+        json!({"EventType": "process_create", "CommandLine": "exec whoami"}),
+        // Pure digits; rule fires (whoami absent). The cross-rule AC must
+        // not drop this rule via "no hit" pruning.
+        json!({"EventType": "process_create", "CommandLine": "0123456789"}),
+    ];
+    let actual = evaluate_corpus(&engine, &events);
+
+    let expected: Vec<Vec<String>> = vec![
+        vec!["Selection Without Substring".into()],
+        Vec::<String>::new(),
+        vec!["Selection Without Substring".into()],
+    ];
+
+    assert_eq!(actual, expected);
+}
+
+#[cfg(feature = "daachorse-index")]
+#[test]
+fn cross_rule_ac_composes_with_bloom() {
+    // Both pre-filters can be enabled simultaneously. Output must remain
+    // identical to the no-prefilter baseline.
+    let mut engine = engine_from(CONTAINS_HEAVY_RULES);
+
+    let events = vec![
+        json!({"EventType": "login", "Image": "C:/Windows/System32/explorer.exe"}),
+        json!({"Image": "C:/Tools/MIMIKATZ.exe", "CommandLine": "mimikatz.exe foo"}),
+        json!({"Image": "/usr/bin/whoami", "CommandLine": "whoami /all"}),
+        json!({"Image": "0000000000", "CommandLine": "0000111122223333"}),
+    ];
+    let baseline = evaluate_corpus(&engine, &events);
+
+    engine.set_cross_rule_ac(true);
+    engine.set_bloom_prefilter(true);
+    let combined = evaluate_corpus(&engine, &events);
+
+    assert_eq!(
+        baseline, combined,
+        "cross-rule AC + bloom must agree with the no-prefilter baseline"
+    );
+}
