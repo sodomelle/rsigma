@@ -14,7 +14,10 @@ impl HealthState {
     }
 
     pub fn set_ready(&self, ready: bool) {
-        self.ready.store(ready, Ordering::Release);
+        let previous = self.ready.swap(ready, Ordering::AcqRel);
+        if previous != ready {
+            tracing::info!(ready, "Readiness state changed");
+        }
     }
 
     pub fn is_ready(&self) -> bool {

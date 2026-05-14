@@ -440,10 +440,23 @@ pub async fn run_daemon(config: DaemonConfig) {
                 interval.tick().await;
                 if let Some(snapshot) = save_processor.export_state() {
                     let position = source_position_from_atomics(&save_hw_seq, &save_hw_ts);
+                    let snapshot_size = serde_json::to_vec(&snapshot).map(|v| v.len()).unwrap_or(0);
+                    let window_count = snapshot.windows.len();
+                    let save_start = std::time::Instant::now();
                     if let Err(e) = save_store.save(&snapshot, position.as_ref()).await {
-                        tracing::warn!(error = %e, "Failed to save periodic state snapshot");
+                        tracing::warn!(
+                            error = %e,
+                            size_bytes = snapshot_size,
+                            windows = window_count,
+                            "Failed to save periodic state snapshot",
+                        );
                     } else {
-                        tracing::debug!("Periodic state snapshot saved");
+                        tracing::debug!(
+                            duration_ms = save_start.elapsed().as_millis() as u64,
+                            size_bytes = snapshot_size,
+                            windows = window_count,
+                            "Periodic state snapshot saved",
+                        );
                     }
                 }
             }
@@ -811,12 +824,16 @@ pub async fn run_daemon(config: DaemonConfig) {
 
         if let Some(h) = source_handle {
             h.abort();
+            tracing::info!("Source task aborted");
         }
 
         let drain = async {
             let _ = sink_handle.await;
+            tracing::debug!("Sink task finished");
             let _ = dlq_handle.await;
+            tracing::debug!("DLQ task finished");
             let _ = ack_handle.await;
+            tracing::debug!("Ack task finished");
         };
         if tokio::time::timeout(drain_duration, drain).await.is_err() {
             tracing::warn!(
@@ -826,8 +843,11 @@ pub async fn run_daemon(config: DaemonConfig) {
         }
     } else {
         let _ = sink_handle.await;
+        tracing::debug!("Sink task finished");
         let _ = dlq_handle.await;
+        tracing::debug!("DLQ task finished");
         let _ = ack_handle.await;
+        tracing::debug!("Ack task finished");
     }
 
     // Save state on shutdown

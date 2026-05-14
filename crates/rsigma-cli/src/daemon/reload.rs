@@ -14,19 +14,32 @@ pub fn spawn_file_watcher(
 ) -> Option<RecommendedWatcher> {
     let tx = reload_tx.clone();
     let mut watcher = match RecommendedWatcher::new(
-        move |res: Result<Event, notify::Error>| {
-            if let Ok(event) = res
-                && matches!(
+        move |res: Result<Event, notify::Error>| match res {
+            Ok(event) => {
+                if matches!(
                     event.kind,
                     EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                )
-            {
-                let is_yaml = event.paths.iter().any(|p| {
-                    matches!(p.extension().and_then(|e| e.to_str()), Some("yml" | "yaml"))
-                });
-                if is_yaml {
-                    let _ = tx.try_send(());
+                ) {
+                    let is_yaml = event.paths.iter().any(|p| {
+                        matches!(p.extension().and_then(|e| e.to_str()), Some("yml" | "yaml"))
+                    });
+                    if is_yaml {
+                        match tx.try_send(()) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                tracing::debug!(
+                                    "Reload channel full, event coalesced into pending reload"
+                                );
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                tracing::warn!("Reload channel closed, watcher event dropped");
+                            }
+                        }
+                    }
                 }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "File watcher error");
             }
         },
         notify::Config::default(),
