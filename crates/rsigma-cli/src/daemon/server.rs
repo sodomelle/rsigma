@@ -1357,6 +1357,9 @@ async fn otlp_http_logs(
     let is_json = content_type.starts_with("application/json");
     let encoding = if is_proto { "protobuf" } else { "json" };
 
+    let span = tracing::debug_span!("otlp_ingest", transport = "http", encoding);
+    let _enter = span.enter();
+
     if !is_proto && !is_json {
         state
             .metrics
@@ -1439,10 +1442,9 @@ async fn otlp_http_logs(
         .inc();
 
     let raw_events = rsigma_runtime::logs_request_to_raw_events(&request);
-    state
-        .metrics
-        .otlp_log_records
-        .inc_by(raw_events.len() as u64);
+    let record_count = raw_events.len();
+    state.metrics.otlp_log_records.inc_by(record_count as u64);
+    tracing::debug!(record_count, "OTLP logs ingested");
 
     for event in raw_events {
         if state.otlp_event_tx.send(event).await.is_err() {
@@ -1507,15 +1509,18 @@ impl rsigma_runtime::LogsService for OtlpLogsGrpcService {
         &self,
         request: tonic::Request<rsigma_runtime::ExportLogsServiceRequest>,
     ) -> Result<tonic::Response<rsigma_runtime::ExportLogsServiceResponse>, tonic::Status> {
+        let span = tracing::debug_span!("otlp_ingest", transport = "grpc", encoding = "protobuf");
+        let _enter = span.enter();
+
         self.metrics
             .otlp_requests
             .with_label_values(&["grpc", "protobuf"])
             .inc();
 
         let raw_events = rsigma_runtime::logs_request_to_raw_events(&request.into_inner());
-        self.metrics
-            .otlp_log_records
-            .inc_by(raw_events.len() as u64);
+        let record_count = raw_events.len();
+        self.metrics.otlp_log_records.inc_by(record_count as u64);
+        tracing::debug!(record_count, "OTLP logs ingested");
 
         for event in raw_events {
             self.event_tx.send(event).await.map_err(|_| {
