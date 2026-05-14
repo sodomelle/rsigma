@@ -28,7 +28,6 @@ clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = { package = "yaml_serde", version = "0.10" }
-yamlpatch_yaml = { package = "serde_yaml", version = "0.9" }
 jaq-interpret = "1.5.0"
 jaq-parse = "1.0.3"
 serde_json_path = "0.7.2"
@@ -36,7 +35,7 @@ jsonschema = "0.46"
 ureq = "3"
 dirs = "6"
 yamlpath = "1.24"
-yamlpatch = "1.24"
+yamlpatch = "1.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
