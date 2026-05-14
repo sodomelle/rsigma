@@ -24,3 +24,21 @@ impl HealthState {
         self.ready.load(Ordering::Acquire)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_ready_records_transition_correctly() {
+        let state = HealthState::new();
+        assert!(!state.is_ready());
+        state.set_ready(true);
+        assert!(state.is_ready());
+        // No-op transition: still ready, no panic, no flip.
+        state.set_ready(true);
+        assert!(state.is_ready());
+        state.set_ready(false);
+        assert!(!state.is_ready());
+    }
+}
