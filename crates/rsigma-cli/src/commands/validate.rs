@@ -77,6 +77,15 @@ pub(crate) fn cmd_validate(
             println!("  Correlation rules: {correlations}");
             println!("  Filter rules:      {filters}");
             println!("  Parse errors:      {parse_errors}");
+            tracing::info!(
+                total,
+                detection_rules = rules,
+                correlation_rules = correlations,
+                filter_rules = filters,
+                parse_errors,
+                rules_path = %path.display(),
+                "Validation parsed",
+            );
 
             let mut engine = Engine::new();
             for p in &pipelines {

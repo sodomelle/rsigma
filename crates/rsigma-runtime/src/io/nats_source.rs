@@ -118,7 +118,10 @@ impl EventSource for NatsSource {
                     tracing::warn!(error = %e, "NATS message error");
                     continue;
                 }
-                None => return None,
+                None => {
+                    tracing::debug!("NATS stream ended");
+                    return None;
+                }
             }
         }
     }

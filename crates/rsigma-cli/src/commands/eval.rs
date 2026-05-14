@@ -170,6 +170,12 @@ fn cmd_eval_with_correlations(
         engine.correlation_rule_count(),
         rules_path.display(),
     );
+    tracing::info!(
+        detection_rules = engine.detection_rule_count(),
+        correlation_rules = engine.correlation_rule_count(),
+        rules_path = %rules_path.display(),
+        "Rules loaded",
+    );
 
     match event_source {
         EventSource::SingleJson(json_str) => {
@@ -422,6 +428,12 @@ fn cmd_eval_detection_only(
         "Loaded {} rules from {}",
         engine.rule_count(),
         rules_path.display()
+    );
+    tracing::info!(
+        detection_rules = engine.rule_count(),
+        correlation_rules = 0,
+        rules_path = %rules_path.display(),
+        "Rules loaded",
     );
 
     match event_source {

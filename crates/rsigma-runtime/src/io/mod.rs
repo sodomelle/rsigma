@@ -135,8 +135,16 @@ impl Sink {
                 #[cfg(feature = "nats")]
                 Sink::Nats(s) => s.send(result).await,
                 Sink::FanOut(sinks) => {
-                    for sink in sinks {
-                        sink.send(result).await?;
+                    for (idx, sink) in sinks.iter_mut().enumerate() {
+                        if let Err(e) = sink.send(result).await {
+                            tracing::warn!(
+                                sink_index = idx,
+                                sink_type = sink.kind_label(),
+                                error = %e,
+                                "Fan-out child sink failed",
+                            );
+                            return Err(e);
+                        }
                     }
                     Ok(())
                 }
@@ -157,13 +165,32 @@ impl Sink {
                 #[cfg(feature = "nats")]
                 Sink::Nats(s) => s.send_raw(json).await,
                 Sink::FanOut(sinks) => {
-                    for sink in sinks {
-                        sink.send_raw(json).await?;
+                    for (idx, sink) in sinks.iter_mut().enumerate() {
+                        if let Err(e) = sink.send_raw(json).await {
+                            tracing::warn!(
+                                sink_index = idx,
+                                sink_type = sink.kind_label(),
+                                error = %e,
+                                "Fan-out child sink failed (raw)",
+                            );
+                            return Err(e);
+                        }
                     }
                     Ok(())
                 }
             }
         })
+    }
+
+    /// Short label for the sink variant, used in structured logs.
+    fn kind_label(&self) -> &'static str {
+        match self {
+            Sink::Stdout(_) => "stdout",
+            Sink::File(_) => "file",
+            #[cfg(feature = "nats")]
+            Sink::Nats(_) => "nats",
+            Sink::FanOut(_) => "fanout",
+        }
     }
 }
 
@@ -188,6 +215,7 @@ pub fn spawn_source<S: EventSource>(
                     Err(tokio::sync::mpsc::error::TrySendError::Full(raw_event)) => {
                         m.on_back_pressure();
                         m.on_input_queue_depth_change(1);
+                        tracing::warn!("Input channel full, backpressure applied");
                         if event_tx.send(raw_event).await.is_err() {
                             tracing::debug!("Event channel closed, source shutting down");
                             break;

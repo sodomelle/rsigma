@@ -152,6 +152,15 @@ pub(crate) fn cmd_lint(
         warnings_colored,
         infos_colored,
     );
+    tracing::info!(
+        files = total_files,
+        passed,
+        failed = failed_files,
+        errors = total_errors,
+        warnings = total_warnings,
+        infos = total_infos,
+        "Lint summary",
+    );
 
     // 6. Apply fixes if requested
     if apply_fix {

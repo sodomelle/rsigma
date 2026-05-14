@@ -21,8 +21,27 @@ use serde_json_path::JsonPath;
 #[command(about = "Parse, validate, and evaluate Sigma detection rules")]
 #[command(version)]
 struct Cli {
+    /// Emit structured diagnostic logs to stderr (for CI / log aggregation).
+    ///
+    /// When set, initializes a tracing-subscriber on stderr using the chosen
+    /// format. Verbosity is controlled via the RUST_LOG environment variable
+    /// (default: info). Human-readable stdout/stderr output is unchanged;
+    /// this flag only adds machine-readable diagnostic logs alongside it.
+    ///
+    /// Has no effect on the `daemon` subcommand, which always logs JSON.
+    #[arg(long = "log-format", value_enum, global = true)]
+    log_format: Option<LogFormat>,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum LogFormat {
+    /// Structured JSON (one object per line).
+    Json,
+    /// Human-readable text with ANSI colors when stderr is a TTY.
+    Text,
 }
 
 #[derive(Subcommand)]
@@ -569,6 +588,16 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
+    // Daemon installs its own JSON subscriber unconditionally; only init for
+    // other subcommands when the user opts in via --log-format.
+    #[cfg(feature = "daemon")]
+    let is_daemon = matches!(cli.command, Commands::Daemon { .. });
+    #[cfg(not(feature = "daemon"))]
+    let is_daemon = false;
+    if !is_daemon && let Some(format) = cli.log_format {
+        init_cli_log_subscriber(format);
+    }
+
     match cli.command {
         #[cfg(feature = "daemon")]
         Commands::Daemon {
@@ -822,6 +851,28 @@ fn main() {
             pretty,
             dry_run,
         } => commands::cmd_resolve(pipelines, source, pretty, dry_run),
+    }
+}
+
+/// Initialize a stderr tracing subscriber for non-daemon subcommands.
+///
+/// Verbosity follows `RUST_LOG` and defaults to `info`. Errors during global
+/// subscriber registration are ignored so the CLI keeps working even if the
+/// flag is passed twice or another consumer of the process already installed
+/// a subscriber.
+fn init_cli_log_subscriber(format: LogFormat) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr);
+    match format {
+        LogFormat::Json => {
+            let _ = builder.json().try_init();
+        }
+        LogFormat::Text => {
+            let _ = builder.try_init();
+        }
     }
 }
 

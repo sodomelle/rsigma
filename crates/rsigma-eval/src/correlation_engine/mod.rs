@@ -963,6 +963,17 @@ impl CorrelationEngine {
             let target = self.config.max_state_entries * 9 / 10;
             let excess = self.state.len() - target;
 
+            log::warn!(
+                "Correlation state hard cap reached ({} entries, max {}); \
+                 evicting {} stalest entries to {} (90% capacity). \
+                 This indicates high-cardinality traffic; consider raising \
+                 max_state_entries or shortening correlation windows.",
+                self.state.len(),
+                self.config.max_state_entries,
+                excess,
+                target,
+            );
+
             // Collect keys with their latest timestamp, sort by oldest first
             let mut by_staleness: Vec<_> = self
                 .state

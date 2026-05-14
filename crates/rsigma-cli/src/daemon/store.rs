@@ -46,6 +46,8 @@ impl SqliteStateStore {
 
         Self::migrate(&conn)?;
 
+        tracing::debug!(path = %path.display(), "State store opened");
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -75,6 +77,10 @@ impl SqliteStateStore {
                 "#,
             )
             .map_err(|e| format!("migrate source position columns: {e}"))?;
+            tracing::debug!(
+                added_columns = "source_sequence,source_timestamp",
+                "State store schema migrated",
+            );
         }
 
         Ok(())

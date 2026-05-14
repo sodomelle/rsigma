@@ -55,37 +55,48 @@ impl NatsSink {
             return Ok(());
         }
 
+        let mut published = 0_usize;
         for m in &result.detections {
             let json = serde_json::to_string(m)?;
-            self.jetstream
-                .publish(self.subject.clone(), json.into())
-                .await
-                .map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?
-                .await
-                .map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
+            self.publish_one(&json).await?;
+            published += 1;
         }
 
         for m in &result.correlations {
             let json = serde_json::to_string(m)?;
-            self.jetstream
-                .publish(self.subject.clone(), json.into())
-                .await
-                .map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?
-                .await
-                .map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
+            self.publish_one(&json).await?;
+            published += 1;
         }
 
+        tracing::debug!(
+            subject = %self.subject,
+            messages = published,
+            "NATS messages published",
+        );
         Ok(())
     }
 
     /// Publish a pre-serialized JSON string directly to the JetStream subject.
     pub async fn send_raw(&self, json: &str) -> Result<(), RuntimeError> {
-        self.jetstream
+        self.publish_one(json).await?;
+        tracing::debug!(subject = %self.subject, "NATS message published (raw)");
+        Ok(())
+    }
+
+    /// Publish a single JSON payload, logging a warning on failure before returning.
+    async fn publish_one(&self, json: &str) -> Result<(), RuntimeError> {
+        let ack = self
+            .jetstream
             .publish(self.subject.clone(), json.to_string().into())
             .await
-            .map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?
-            .await
-            .map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
+            .map_err(|e| {
+                tracing::warn!(subject = %self.subject, error = %e, "NATS publish failed");
+                RuntimeError::Io(std::io::Error::other(e))
+            })?;
+        ack.await.map_err(|e| {
+            tracing::warn!(subject = %self.subject, error = %e, "NATS publish ack failed");
+            RuntimeError::Io(std::io::Error::other(e))
+        })?;
         Ok(())
     }
 }

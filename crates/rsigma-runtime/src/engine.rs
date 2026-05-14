@@ -182,6 +182,10 @@ impl RuntimeEngine {
     ///
     /// Dynamic pipeline sources are resolved if a source resolver is configured.
     pub fn load_rules(&mut self) -> Result<EngineStats, String> {
+        let load_span = tracing::info_span!("load_rules", rules_path = %self.rules_path.display());
+        let _enter = load_span.enter();
+        let load_start = std::time::Instant::now();
+
         if !self.pipeline_paths.is_empty() {
             self.pipelines = reload_pipelines(&self.pipeline_paths)?;
         }
@@ -239,6 +243,12 @@ impl RuntimeEngine {
                 state_entries: engine.state_count(),
             };
             self.engine = EngineVariant::WithCorrelations(Box::new(engine));
+            tracing::debug!(
+                detection_rules = stats.detection_rules,
+                correlation_rules = stats.correlation_rules,
+                duration_ms = load_start.elapsed().as_millis() as u64,
+                "Rule load complete",
+            );
             Ok(stats)
         } else {
             let mut engine = Engine::new();
@@ -262,6 +272,12 @@ impl RuntimeEngine {
                 state_entries: 0,
             };
             self.engine = EngineVariant::DetectionOnly(Box::new(engine));
+            tracing::debug!(
+                detection_rules = stats.detection_rules,
+                correlation_rules = stats.correlation_rules,
+                duration_ms = load_start.elapsed().as_millis() as u64,
+                "Rule load complete",
+            );
             Ok(stats)
         }
     }
@@ -357,6 +373,9 @@ fn load_collection(path: &Path) -> Result<SigmaCollection, String> {
             count = collection.errors.len(),
             "Parse errors while loading rules"
         );
+        for (i, err) in collection.errors.iter().take(3).enumerate() {
+            tracing::warn!(index = i + 1, error = %err, "Rule parse error detail");
+        }
     }
 
     Ok(collection)
