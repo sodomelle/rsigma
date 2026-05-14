@@ -23,6 +23,7 @@ For rule quality and editor integration, a built-in linter validates rules again
 * pySigma-compatible processing pipelines for field mapping, transformations, conditions, and finalizers
 * Dynamic pipelines: populate any pipeline value from external sources (HTTP, files, commands, NATS) with template expansion, auto-refresh, and data extraction via jq, JSONPath, or CEL
 * Convert rules into backend-native query strings via a pluggable backend trait (PostgreSQL/TimescaleDB SQL, LynxDB)
+* Optional eval prefilters for large rule sets: bloom filter for substring matchers (`--bloom-prefilter`) and cross-rule Aho-Corasick index for whole-rule pruning (`--cross-rule-ac`, requires `daachorse-index` feature)
 * Run as a streaming detection daemon with hot-reload, Prometheus metrics, and HTTP/NATS/OTLP input
 * NATS JetStream support with authentication (credentials, mTLS), replay, consumer groups, and dead-letter queues
 * OTLP support for any OpenTelemetry-compatible agent (Grafana Alloy, Vector, Fluent Bit, OTel Collector) via HTTP or gRPC
