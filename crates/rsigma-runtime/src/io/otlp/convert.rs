@@ -163,7 +163,10 @@ fn any_value_to_json(value: &AnyValue) -> Value {
             Value::Object(m)
         }
         Some(any_value::Value::BytesValue(bytes)) => Value::String(hex::encode(bytes)),
-        None => Value::Null,
+        // StringValueStrindex references a string in ProfilesDictionary.string_table
+        // and is exclusive to the Profiling signal. Per the OTLP spec, non-Profiling
+        // receivers must treat its presence as if the value were absent.
+        Some(any_value::Value::StringValueStrindex(_)) | None => Value::Null,
     }
 }
 
@@ -202,6 +205,7 @@ mod tests {
         KeyValue {
             key: key.to_string(),
             value: Some(value),
+            ..Default::default()
         }
     }
 
