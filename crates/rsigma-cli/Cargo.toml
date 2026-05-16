@@ -68,6 +68,6 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["nats"] }
 rusqlite = { version = "0.39", features = ["bundled"] }
 serde_json = "1"
-opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic", "logs", "with-serde"] }
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic", "logs", "with-serde"] }
 prost = "0.14"
 flate2 = "1"
