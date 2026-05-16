@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{SIMPLE_RULE, temp_file};
+use common::{DaemonProcess, SIMPLE_RULE, http_get, poll_until, temp_file};
 use opentelemetry_proto::tonic::{
     collector::logs::v1::ExportLogsServiceRequest,
     common::v1::{AnyValue, KeyValue, KeyValueList, any_value},
@@ -16,81 +16,7 @@ use opentelemetry_proto::tonic::{
     resource::v1::Resource,
 };
 use prost::Message;
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
 use std::time::Duration;
-
-fn rsigma_bin() -> String {
-    assert_cmd::cargo::cargo_bin("rsigma")
-        .to_str()
-        .unwrap()
-        .to_string()
-}
-
-struct DaemonProcess {
-    child: std::process::Child,
-    api_addr: String,
-}
-
-impl DaemonProcess {
-    fn spawn(rule_path: &str) -> Self {
-        let mut child = Command::new(rsigma_bin())
-            .args([
-                "daemon",
-                "-r",
-                rule_path,
-                "--input",
-                "http",
-                "--api-addr",
-                "127.0.0.1:0",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn rsigma daemon");
-
-        let stderr = child.stderr.take().unwrap();
-        let reader = BufReader::new(stderr);
-        let mut api_addr = String::new();
-
-        for line in reader.lines() {
-            let line = line.unwrap();
-            if line.contains("API server listening")
-                && let Some(addr) = extract_addr(&line)
-            {
-                api_addr = addr;
-            }
-            if line.contains("Sink started") {
-                break;
-            }
-        }
-
-        assert!(
-            !api_addr.is_empty(),
-            "failed to discover API address from daemon stderr"
-        );
-
-        Self { child, api_addr }
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("http://{}{path}", self.api_addr)
-    }
-}
-
-impl Drop for DaemonProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn extract_addr(line: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(line)
-        .ok()
-        .and_then(|v| v["fields"]["addr"].as_str().map(|s| s.to_string()))
-}
 
 fn string_val(s: &str) -> AnyValue {
     AnyValue {
@@ -129,11 +55,15 @@ fn make_otlp_request(fields: Vec<KeyValue>) -> ExportLogsServiceRequest {
     }
 }
 
-fn http_get(url: &str) -> (u16, String) {
-    let resp = ureq::get(url).call().expect("HTTP GET failed");
-    let status = resp.status().as_u16();
-    let body = resp.into_body().read_to_string().unwrap();
-    (status, body)
+/// Wait until `/api/v1/status` reports `detection_matches >= 1`.
+/// Panics with a clear message on timeout.
+fn wait_for_detection_match(daemon: &DaemonProcess) {
+    poll_until(Duration::from_secs(5), || {
+        let (_, body) = http_get(&daemon.url("/api/v1/status"));
+        let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+        (v["detection_matches"].as_u64()? >= 1).then_some(())
+    })
+    .expect("detection_matches never reached 1 within 5s");
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +73,7 @@ fn http_get(url: &str) -> (u16, String) {
 #[test]
 fn otlp_http_protobuf_accepted() {
     let rule = temp_file(".yml", SIMPLE_RULE);
-    let daemon = DaemonProcess::spawn(rule.path().to_str().unwrap());
+    let daemon = DaemonProcess::spawn_http(rule.path().to_str().unwrap());
 
     let request = make_otlp_request(vec![kv("CommandLine", string_val("something benign"))]);
     let mut buf = Vec::new();
@@ -163,7 +93,7 @@ fn otlp_http_protobuf_accepted() {
 #[test]
 fn otlp_http_protobuf_triggers_detection() {
     let rule = temp_file(".yml", SIMPLE_RULE);
-    let daemon = DaemonProcess::spawn(rule.path().to_str().unwrap());
+    let daemon = DaemonProcess::spawn_http(rule.path().to_str().unwrap());
 
     let request = make_otlp_request(vec![kv("CommandLine", string_val("run malware.exe now"))]);
     let mut buf = Vec::new();
@@ -175,7 +105,7 @@ fn otlp_http_protobuf_triggers_detection() {
         .expect("OTLP POST failed");
     assert_eq!(resp.status().as_u16(), 200);
 
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for_detection_match(&daemon);
 
     let (_, status_body) = http_get(&daemon.url("/api/v1/status"));
     let v: serde_json::Value = serde_json::from_str(&status_body).unwrap();
@@ -196,7 +126,7 @@ fn otlp_http_protobuf_triggers_detection() {
 #[test]
 fn otlp_http_json_accepted() {
     let rule = temp_file(".yml", SIMPLE_RULE);
-    let daemon = DaemonProcess::spawn(rule.path().to_str().unwrap());
+    let daemon = DaemonProcess::spawn_http(rule.path().to_str().unwrap());
 
     let request = make_otlp_request(vec![kv("CommandLine", string_val("benign process"))]);
     let json_body = serde_json::to_string(&request).unwrap();
@@ -215,7 +145,7 @@ fn otlp_http_json_accepted() {
 #[test]
 fn otlp_http_json_triggers_detection() {
     let rule = temp_file(".yml", SIMPLE_RULE);
-    let daemon = DaemonProcess::spawn(rule.path().to_str().unwrap());
+    let daemon = DaemonProcess::spawn_http(rule.path().to_str().unwrap());
 
     let request = make_otlp_request(vec![kv("CommandLine", string_val("launch malware.exe"))]);
     let json_body = serde_json::to_string(&request).unwrap();
@@ -226,7 +156,7 @@ fn otlp_http_json_triggers_detection() {
         .expect("OTLP JSON POST failed");
     assert_eq!(resp.status().as_u16(), 200);
 
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for_detection_match(&daemon);
 
     let (_, status_body) = http_get(&daemon.url("/api/v1/status"));
     let v: serde_json::Value = serde_json::from_str(&status_body).unwrap();
@@ -247,7 +177,7 @@ fn otlp_http_gzip_protobuf_accepted() {
     use std::io::Write;
 
     let rule = temp_file(".yml", SIMPLE_RULE);
-    let daemon = DaemonProcess::spawn(rule.path().to_str().unwrap());
+    let daemon = DaemonProcess::spawn_http(rule.path().to_str().unwrap());
 
     let request = make_otlp_request(vec![kv("CommandLine", string_val("malware.exe gzip test"))]);
     let mut proto_buf = Vec::new();
@@ -265,7 +195,7 @@ fn otlp_http_gzip_protobuf_accepted() {
 
     assert_eq!(resp.status().as_u16(), 200);
 
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for_detection_match(&daemon);
 
     let (_, status_body) = http_get(&daemon.url("/api/v1/status"));
     let v: serde_json::Value = serde_json::from_str(&status_body).unwrap();
@@ -282,7 +212,7 @@ fn otlp_http_gzip_protobuf_accepted() {
 #[test]
 fn otlp_http_unsupported_content_type_returns_415() {
     let rule = temp_file(".yml", SIMPLE_RULE);
-    let daemon = DaemonProcess::spawn(rule.path().to_str().unwrap());
+    let daemon = DaemonProcess::spawn_http(rule.path().to_str().unwrap());
 
     let result = ureq::post(&daemon.url("/v1/logs"))
         .header("Content-Type", "text/plain")
@@ -297,7 +227,7 @@ fn otlp_http_unsupported_content_type_returns_415() {
 #[test]
 fn otlp_http_malformed_protobuf_returns_400() {
     let rule = temp_file(".yml", SIMPLE_RULE);
-    let daemon = DaemonProcess::spawn(rule.path().to_str().unwrap());
+    let daemon = DaemonProcess::spawn_http(rule.path().to_str().unwrap());
 
     let result = ureq::post(&daemon.url("/v1/logs"))
         .header("Content-Type", "application/x-protobuf")
@@ -312,7 +242,7 @@ fn otlp_http_malformed_protobuf_returns_400() {
 #[test]
 fn otlp_http_malformed_json_returns_400() {
     let rule = temp_file(".yml", SIMPLE_RULE);
-    let daemon = DaemonProcess::spawn(rule.path().to_str().unwrap());
+    let daemon = DaemonProcess::spawn_http(rule.path().to_str().unwrap());
 
     let result = ureq::post(&daemon.url("/v1/logs"))
         .header("Content-Type", "application/json")
@@ -331,7 +261,7 @@ fn otlp_http_malformed_json_returns_400() {
 #[test]
 fn otlp_metrics_exposed_after_request() {
     let rule = temp_file(".yml", SIMPLE_RULE);
-    let daemon = DaemonProcess::spawn(rule.path().to_str().unwrap());
+    let daemon = DaemonProcess::spawn_http(rule.path().to_str().unwrap());
 
     let request = make_otlp_request(vec![kv("CommandLine", string_val("test"))]);
     let mut buf = Vec::new();
@@ -342,10 +272,15 @@ fn otlp_metrics_exposed_after_request() {
         .send(&buf[..])
         .expect("OTLP POST failed");
 
-    std::thread::sleep(Duration::from_millis(200));
+    let body = poll_until(Duration::from_secs(5), || {
+        let (status, body) = http_get(&daemon.url("/metrics"));
+        (status == 200
+            && body.contains("rsigma_otlp_requests_total")
+            && body.contains("rsigma_otlp_log_records_total"))
+        .then_some(body)
+    })
+    .expect("OTLP metrics never appeared within 5s");
 
-    let (status, body) = http_get(&daemon.url("/metrics"));
-    assert_eq!(status, 200);
     assert!(
         body.contains("rsigma_otlp_requests_total"),
         "metrics should contain rsigma_otlp_requests_total"
