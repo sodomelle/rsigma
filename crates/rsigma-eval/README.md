@@ -17,9 +17,11 @@ This library is part of [rsigma].
 | `set_include_event(include: bool)` | Global override: include full event JSON in all match results |
 | `add_pipeline(pipeline)` | Add a pipeline (sorted by `priority` after add) |
 | `add_rule(rule: &SigmaRule)` | Apply pipelines and compile a rule |
+| `add_rules(rules)` | Batched add of many rules; returns per-rule compile errors as `(index, error)` pairs and rebuilds engine indexes once |
 | `add_collection(collection: &SigmaCollection)` | Add all rules, then apply all filters |
 | `add_collection_with_pipelines(collection, pipelines)` | Temporarily replace pipelines, add collection, restore |
 | `add_compiled_rule(rule: CompiledRule)` | Add a pre-compiled rule directly |
+| `extend_compiled_rules(rules)` | Batched add of pre-compiled rules; rebuilds engine indexes once |
 | `apply_filter(filter: &FilterRule)` | Inject filter as `AND NOT` into referenced rules |
 | `evaluate(event: &Event)` | Evaluate all rules against an event |
 | `evaluate_with_logsource(event, logsource)` | Evaluate with logsource-based pre-filtering |

@@ -18,7 +18,7 @@ use rsigma_parser::{
 use crate::compiler::{
     CompiledRule, compile_detection, compile_rule, evaluate_rule, evaluate_rule_with_bloom,
 };
-use crate::error::Result;
+use crate::error::{EvalError, Result};
 use crate::event::Event;
 use crate::pipeline::{Pipeline, apply_pipelines};
 use crate::result::MatchResult;
@@ -249,17 +249,41 @@ impl Engine {
     ///
     /// If pipelines are set, the rule is cloned and transformed before compilation.
     /// The inverted index is rebuilt after adding the rule.
+    ///
+    /// Loading many rules through this method in a loop costs O(N²) in the
+    /// rule count because every call triggers a full index rebuild. Use
+    /// [`Engine::add_rules`] or [`Engine::add_collection`] for bulk loads.
     pub fn add_rule(&mut self, rule: &SigmaRule) -> Result<()> {
-        let compiled = if self.pipelines.is_empty() {
-            compile_rule(rule)?
-        } else {
-            let mut transformed = rule.clone();
-            apply_pipelines(&self.pipelines, &mut transformed)?;
-            compile_rule(&transformed)?
-        };
+        let compiled = self.compile_with_pipelines(rule)?;
         self.rules.push(compiled);
         self.rebuild_index();
         Ok(())
+    }
+
+    /// Add many parsed Sigma rules in a single batch.
+    ///
+    /// Each rule is compiled (with the engine's pipelines applied, if any)
+    /// and pushed onto the rule set. Compilation errors are collected and
+    /// returned as `(rule_index_in_input, error)` pairs without aborting the
+    /// batch; rules that did compile remain loaded. The inverted index and
+    /// per-field bloom filter are rebuilt **once** at the end of the batch.
+    ///
+    /// Prefer this over a loop of [`Engine::add_rule`] when loading large
+    /// rule sets: the per-call rebuild is O(N) in the total rule count, so
+    /// per-rule adds turn a 3K-rule corpus into O(N²) work.
+    pub fn add_rules<'a, I>(&mut self, rules: I) -> Vec<(usize, EvalError)>
+    where
+        I: IntoIterator<Item = &'a SigmaRule>,
+    {
+        let mut errors = Vec::new();
+        for (idx, rule) in rules.into_iter().enumerate() {
+            match self.compile_with_pipelines(rule) {
+                Ok(compiled) => self.rules.push(compiled),
+                Err(e) => errors.push((idx, e)),
+            }
+        }
+        self.rebuild_index();
+        errors
     }
 
     /// Add all detection rules from a parsed collection, then apply filters.
@@ -269,13 +293,7 @@ impl Engine {
     /// The inverted index is rebuilt once after all rules and filters are loaded.
     pub fn add_collection(&mut self, collection: &SigmaCollection) -> Result<()> {
         for rule in &collection.rules {
-            let compiled = if self.pipelines.is_empty() {
-                compile_rule(rule)?
-            } else {
-                let mut transformed = rule.clone();
-                apply_pipelines(&self.pipelines, &mut transformed)?;
-                compile_rule(&transformed)?
-            };
+            let compiled = self.compile_with_pipelines(rule)?;
             self.rules.push(compiled);
         }
         for filter in &collection.filters {
@@ -283,6 +301,19 @@ impl Engine {
         }
         self.rebuild_index();
         Ok(())
+    }
+
+    /// Compile a rule, applying any configured pipelines first. Shared by
+    /// the single- and batched-add paths so they stay behaviourally
+    /// identical.
+    fn compile_with_pipelines(&self, rule: &SigmaRule) -> Result<CompiledRule> {
+        if self.pipelines.is_empty() {
+            compile_rule(rule)
+        } else {
+            let mut transformed = rule.clone();
+            apply_pipelines(&self.pipelines, &mut transformed)?;
+            compile_rule(&transformed)
+        }
     }
 
     /// Add all detection rules from a collection, applying the given pipelines.
@@ -393,8 +424,23 @@ impl Engine {
     }
 
     /// Add a pre-compiled rule directly and rebuild the index.
+    ///
+    /// Use [`Engine::extend_compiled_rules`] when pushing many rules at
+    /// once; the per-call rebuild here is O(N) in the total rule count and
+    /// turns a tight loop into an O(N²) hot path.
     pub fn add_compiled_rule(&mut self, rule: CompiledRule) {
         self.rules.push(rule);
+        self.rebuild_index();
+    }
+
+    /// Add many pre-compiled rules in a single batch. The inverted index
+    /// and bloom filter are rebuilt exactly once at the end, regardless of
+    /// how many rules are appended.
+    pub fn extend_compiled_rules<I>(&mut self, rules: I)
+    where
+        I: IntoIterator<Item = CompiledRule>,
+    {
+        self.rules.extend(rules);
         self.rebuild_index();
     }
 

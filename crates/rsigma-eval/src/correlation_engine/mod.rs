@@ -247,11 +247,31 @@ impl CorrelationEngine {
     /// Add all rules and correlations from a parsed collection.
     ///
     /// Detection rules are added first (so they're available for correlation
-    /// references), then correlation rules.
+    /// references), then correlation rules. Detection rules are compiled
+    /// sequentially and then pushed to the inner engine in a single batch,
+    /// so the inverted index and bloom filter are rebuilt exactly once for
+    /// the whole collection. Without this batching, large rule sets
+    /// (multi-thousand rules) hit an O(N²) rebuild cost on load.
     pub fn add_collection(&mut self, collection: &SigmaCollection) -> Result<()> {
-        for rule in &collection.rules {
-            self.add_rule(rule)?;
+        let mut compiled_batch = Vec::with_capacity(collection.rules.len());
+        if self.pipelines.is_empty() {
+            for rule in &collection.rules {
+                self.apply_custom_attributes(&rule.custom_attributes);
+                self.rule_ids.push((rule.id.clone(), rule.name.clone()));
+                compiled_batch.push(crate::compiler::compile_rule(rule)?);
+            }
+        } else {
+            for rule in &collection.rules {
+                let mut transformed = rule.clone();
+                apply_pipelines(&self.pipelines, &mut transformed)?;
+                self.apply_custom_attributes(&transformed.custom_attributes);
+                self.rule_ids
+                    .push((transformed.id.clone(), transformed.name.clone()));
+                // Bypass the inner engine's pipelines (would double-transform)
+                compiled_batch.push(crate::compiler::compile_rule(&transformed)?);
+            }
         }
+        self.engine.extend_compiled_rules(compiled_batch);
         // Apply filter rules to the inner engine's detection rules
         for filter in &collection.filters {
             self.engine.apply_filter(filter)?;

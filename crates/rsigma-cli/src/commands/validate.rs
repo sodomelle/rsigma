@@ -92,17 +92,20 @@ pub(crate) fn cmd_validate(
                 engine.add_pipeline(p.clone());
             }
 
-            let mut compile_ok = 0usize;
-            let mut compile_errors: Vec<String> = Vec::new();
-            for rule in &collection.rules {
-                match engine.add_rule(rule) {
-                    Ok(()) => compile_ok += 1,
-                    Err(e) => {
-                        let id = rule.id.as_deref().unwrap_or(&rule.title);
-                        compile_errors.push(format!("{id}: {e}"));
-                    }
-                }
-            }
+            // Batch all rules through `add_rules` so the inverted index and
+            // bloom filter rebuild exactly once for the whole corpus instead
+            // of once per rule (the latter is O(N²) and turns 3K-rule loads
+            // into a multi-minute stall).
+            let batch_errors = engine.add_rules(&collection.rules);
+            let compile_ok = collection.rules.len() - batch_errors.len();
+            let compile_errors: Vec<String> = batch_errors
+                .into_iter()
+                .map(|(idx, e)| {
+                    let rule = &collection.rules[idx];
+                    let id = rule.id.as_deref().unwrap_or(&rule.title);
+                    format!("{id}: {e}")
+                })
+                .collect();
 
             if !pipelines.is_empty() {
                 println!("  Pipeline applied:  {} pipeline(s)", pipelines.len(),);

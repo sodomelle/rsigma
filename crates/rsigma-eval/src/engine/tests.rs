@@ -1183,6 +1183,146 @@ level: low
 }
 
 #[test]
+fn test_add_rules_matches_per_rule_loop() {
+    let yaml = r#"
+title: Login
+logsource:
+    product: windows
+detection:
+    selection:
+        EventType: 'login'
+    condition: selection
+---
+title: Process Create
+logsource:
+    product: windows
+detection:
+    selection:
+        EventType: 'process_create'
+    condition: selection
+---
+title: Keyword
+logsource:
+    product: windows
+detection:
+    selection:
+        CommandLine|contains: 'whoami'
+    condition: selection
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+
+    let mut per_rule = Engine::new();
+    for rule in &collection.rules {
+        per_rule.add_rule(rule).unwrap();
+    }
+
+    let mut batched = Engine::new();
+    let errors = batched.add_rules(&collection.rules);
+    assert!(errors.is_empty());
+
+    assert_eq!(per_rule.rules().len(), batched.rules().len());
+
+    let evs = [
+        json!({"EventType": "login"}),
+        json!({"EventType": "process_create", "CommandLine": "whoami"}),
+        json!({"CommandLine": "whoami /all"}),
+        json!({"EventType": "file_create"}),
+    ];
+    for v in &evs {
+        let event = JsonEvent::borrow(v);
+        let a: Vec<_> = per_rule
+            .evaluate(&event)
+            .into_iter()
+            .map(|m| m.rule_title)
+            .collect();
+        let b: Vec<_> = batched
+            .evaluate(&event)
+            .into_iter()
+            .map(|m| m.rule_title)
+            .collect();
+        assert_eq!(a, b, "verdicts diverge for event {v}");
+    }
+}
+
+#[test]
+fn test_add_rules_collects_errors_without_aborting() {
+    let good = r#"
+title: Login
+logsource:
+    product: windows
+detection:
+    selection:
+        EventType: 'login'
+    condition: selection
+"#;
+    let bad = r#"
+title: Broken Reference
+logsource:
+    product: windows
+detection:
+    selection:
+        EventType: 'x'
+    condition: unknown_identifier
+"#;
+    let good_rule = parse_sigma_yaml(good).unwrap().rules.remove(0);
+    let bad_rule = parse_sigma_yaml(bad).unwrap().rules.remove(0);
+
+    let mut engine = Engine::new();
+    let errors = engine.add_rules([&good_rule, &bad_rule, &good_rule]);
+
+    // The bad rule fails; the two good rules still land in the engine.
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].0, 1);
+    assert_eq!(engine.rules().len(), 2);
+
+    let ev = json!({"EventType": "login"});
+    let matches = engine.evaluate(&JsonEvent::borrow(&ev));
+    assert_eq!(matches.len(), 2);
+}
+
+/// Regression: loading a multi-thousand rule corpus must stay linear in
+/// the rule count. The previous `add_rule` per-rule loop rebuilt the
+/// inverted index after every push, turning a 3K-rule load into a
+/// multi-minute O(N²) stall. Generating 2000 trivial rules and timing the
+/// batched load gives us a cheap, deterministic guard: even on a slow
+/// debug build this completes in well under a second, and the old
+/// per-rule path would blow well past the 30s ceiling.
+#[test]
+fn test_add_rules_scales_linearly_on_large_corpus() {
+    use std::time::Instant;
+
+    let mut yaml = String::new();
+    let n = 2000;
+    for i in 0..n {
+        if i > 0 {
+            yaml.push_str("---\n");
+        }
+        // Mix of exact-match (indexable) and substring (bloom-eligible)
+        // rules so both the rule index and the bloom rebuild are exercised.
+        yaml.push_str(&format!(
+            "title: Rule {i}\nlogsource:\n    product: windows\ndetection:\n    selection:\n        EventID: '{i}'\n        CommandLine|contains: 'needle{i}'\n    condition: selection\n"
+        ));
+    }
+    let collection = parse_sigma_yaml(&yaml).unwrap();
+    assert_eq!(collection.rules.len(), n);
+
+    let started = Instant::now();
+    let mut engine = Engine::new();
+    let errors = engine.add_rules(&collection.rules);
+    let elapsed = started.elapsed();
+
+    assert!(errors.is_empty());
+    assert_eq!(engine.rules().len(), n);
+    // 30s is a coarse ceiling that the linear path clears by ~100x but
+    // the old O(N²) rebuild would not get close to. Stay conservative so
+    // the test never flakes on overloaded CI runners.
+    assert!(
+        elapsed.as_secs() < 30,
+        "loading {n} rules took {elapsed:?}; suspect quadratic regression"
+    );
+}
+
+#[test]
 fn test_evaluate_batch_matches_sequential() {
     let yaml = r#"
 title: Login
