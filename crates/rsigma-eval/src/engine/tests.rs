@@ -1322,6 +1322,42 @@ fn test_add_rules_scales_linearly_on_large_corpus() {
     );
 }
 
+/// Regression: a tight loop of `add_rule` calls must also stay linear in
+/// the rule count. Before incremental indexing this path was O(N²)
+/// because every call rebuilt the inverted index and bloom filter; the
+/// equivalent of [`test_add_rules_scales_linearly_on_large_corpus`] for
+/// the single-rule entry point.
+#[test]
+fn test_add_rule_loop_scales_linearly_on_large_corpus() {
+    use std::time::Instant;
+
+    let mut yaml = String::new();
+    let n = 2000;
+    for i in 0..n {
+        if i > 0 {
+            yaml.push_str("---\n");
+        }
+        yaml.push_str(&format!(
+            "title: Rule {i}\nlogsource:\n    product: windows\ndetection:\n    selection:\n        EventID: '{i}'\n        CommandLine|contains: 'needle{i}'\n    condition: selection\n"
+        ));
+    }
+    let collection = parse_sigma_yaml(&yaml).unwrap();
+    assert_eq!(collection.rules.len(), n);
+
+    let started = Instant::now();
+    let mut engine = Engine::new();
+    for rule in &collection.rules {
+        engine.add_rule(rule).unwrap();
+    }
+    let elapsed = started.elapsed();
+
+    assert_eq!(engine.rules().len(), n);
+    assert!(
+        elapsed.as_secs() < 30,
+        "loading {n} rules one at a time took {elapsed:?}; suspect quadratic regression"
+    );
+}
+
 #[test]
 fn test_evaluate_batch_matches_sequential() {
     let yaml = r#"

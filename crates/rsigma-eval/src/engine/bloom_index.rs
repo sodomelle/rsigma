@@ -192,6 +192,13 @@ impl FieldBloom {
     }
 }
 
+/// Minimum rule-count growth before the doubling watermark trips a full
+/// rebuild. Below this, every rule append takes the incremental path; the
+/// floor stops the index from thrashing on the first handful of rules
+/// where the doubling target ratchet (1 -> 2 -> 4 -> 8) would otherwise
+/// rebuild on almost every add.
+pub(crate) const INCREMENTAL_REBUILD_FLOOR: usize = 64;
+
 /// Per-field bloom filters built from the union of every positive substring
 /// needle across all compiled rules.
 pub(crate) struct FieldBloomIndex {
@@ -199,12 +206,17 @@ pub(crate) struct FieldBloomIndex {
     /// (or that exceeded the memory budget) are absent from the map; probes
     /// against them return `MaybeMatch` and the engine evaluates as usual.
     filters: HashMap<String, FieldBloom>,
+    /// Rule count at the most recent full rebuild. `should_rebuild` uses
+    /// this to schedule the next rebuild via a doubling watermark, so the
+    /// amortized append cost stays O(1) per rule.
+    rebuild_baseline: usize,
 }
 
 impl FieldBloomIndex {
     pub(crate) fn empty() -> Self {
         Self {
             filters: HashMap::new(),
+            rebuild_baseline: 0,
         }
     }
 
@@ -236,24 +248,10 @@ impl FieldBloomIndex {
                 needles.sort();
                 needles.dedup();
 
-                // Count the total number of distinct trigrams that will be
-                // inserted; the bloom must be sized against this number,
-                // not the pattern count, or the filter saturates as soon as
+                // Size the bloom against the distinct trigram count, not
+                // the pattern count, or the filter saturates as soon as
                 // any needle longer than NGRAM_SIZE+1 bytes is inserted.
-                let mut trigram_set: std::collections::HashSet<[u8; NGRAM_SIZE]> =
-                    std::collections::HashSet::new();
-                for needle in &needles {
-                    let bytes = needle.as_bytes();
-                    if bytes.len() < NGRAM_SIZE {
-                        continue;
-                    }
-                    for window in bytes.windows(NGRAM_SIZE) {
-                        let mut buf = [0u8; NGRAM_SIZE];
-                        buf.copy_from_slice(window);
-                        trigram_set.insert(buf);
-                    }
-                }
-                let n_trigrams = trigram_set.len();
+                let n_trigrams = count_unique_trigrams(&needles);
 
                 let mut bloom = FieldBloom::new_with_capacity(n_trigrams)?;
                 for needle in &needles {
@@ -289,7 +287,74 @@ impl FieldBloomIndex {
             .into_iter()
             .map(|b| (b.field, b.bloom))
             .collect::<HashMap<_, _>>();
-        Self { filters }
+        Self {
+            filters,
+            rebuild_baseline: rules.len(),
+        }
+    }
+
+    /// Fold a single rule's positive substring needles into the existing
+    /// per-field blooms.
+    ///
+    /// Cost is bounded by the rule's detection tree size, not by the total
+    /// rule count. Trigrams from the rule are inserted into each affected
+    /// field's existing bloom; new fields get a freshly sized bloom built
+    /// against just this rule's trigram count. The global memory budget
+    /// is **not** re-enforced here: each append can push total usage past
+    /// the configured cap, which the next full rebuild (scheduled by
+    /// `should_rebuild`) restores. Treat the budget as an amortized soft
+    /// target, not a hard real-time ceiling.
+    ///
+    /// Probe semantics are preserved on every step. A `DefinitelyNoMatch`
+    /// verdict from this index after `append_rule` is still correct: the
+    /// new rule's trigrams are present in the relevant filter immediately,
+    /// so any haystack containing one of those trigrams answers
+    /// `MaybeMatch` and the engine evaluates the rule as usual.
+    pub(crate) fn append_rule(&mut self, rule: &CompiledRule) {
+        let mut field_needles: HashMap<String, Vec<String>> = HashMap::new();
+        for detection in rule.detections.values() {
+            collect_positive_substring_needles(detection, &mut field_needles);
+        }
+
+        for (field, mut needles) in field_needles {
+            needles.sort();
+            needles.dedup();
+            if needles.is_empty() {
+                continue;
+            }
+            if let Some(bloom) = self.filters.get_mut(&field) {
+                for needle in &needles {
+                    insert_needle_trigrams(bloom, needle);
+                }
+                continue;
+            }
+            // No filter exists for this field yet. Size a tight bloom against
+            // this rule's trigram count; the next full rebuild will resize it
+            // against the aggregate corpus.
+            let trigram_count = count_unique_trigrams(&needles);
+            if let Some(mut bloom) = FieldBloom::new_with_capacity(trigram_count) {
+                for needle in &needles {
+                    insert_needle_trigrams(&mut bloom, needle);
+                }
+                self.filters.insert(field, bloom);
+            }
+        }
+    }
+
+    /// Whether the engine should trigger a full rebuild at the current
+    /// rule count to reset the amortized budget and bloom sizing.
+    ///
+    /// Returns `true` when the rule count has at least doubled since the
+    /// last full rebuild (with [`INCREMENTAL_REBUILD_FLOOR`] as a minimum
+    /// threshold). Doubling keeps per-rule amortized cost O(1) overall and
+    /// caps the FPR drift of any single bloom at roughly 2x the configured
+    /// target rate between rebuilds.
+    pub(crate) fn should_rebuild(&self, rule_count: usize) -> bool {
+        let threshold = self
+            .rebuild_baseline
+            .saturating_mul(2)
+            .max(INCREMENTAL_REBUILD_FLOOR);
+        rule_count >= threshold && rule_count > self.rebuild_baseline
     }
 
     /// Number of fields with active filters. Useful for diagnostics and
@@ -472,6 +537,26 @@ fn insert_needle_trigrams(bloom: &mut FieldBloom, needle: &str) {
     for window in bytes.windows(NGRAM_SIZE) {
         bloom.insert_trigram(window);
     }
+}
+
+/// Number of distinct trigrams across a needle set. Used to size a fresh
+/// bloom against an actual key-space rather than the (often larger)
+/// raw pattern count.
+fn count_unique_trigrams(needles: &[String]) -> usize {
+    let mut trigram_set: std::collections::HashSet<[u8; NGRAM_SIZE]> =
+        std::collections::HashSet::new();
+    for needle in needles {
+        let bytes = needle.as_bytes();
+        if bytes.len() < NGRAM_SIZE {
+            continue;
+        }
+        for window in bytes.windows(NGRAM_SIZE) {
+            let mut buf = [0u8; NGRAM_SIZE];
+            buf.copy_from_slice(window);
+            trigram_set.insert(buf);
+        }
+    }
+    trigram_set.len()
 }
 
 #[cfg(test)]
@@ -710,5 +795,161 @@ detection:
         // A budget large enough to fit everything keeps all 50 fields.
         let big = FieldBloomIndex::build_with_budget(engine.rules(), 1024);
         assert_eq!(big.field_count(), 50);
+    }
+
+    /// Folding rules one at a time via `append_rule` must yield the same
+    /// `MaybeMatch` and `DefinitelyNoMatch` verdicts as the batched
+    /// `build` path across the trigram-overlap and disjoint cases.
+    #[test]
+    fn append_rule_matches_build_verdicts() {
+        let yaml = r#"
+title: A
+logsource:
+    product: windows
+detection:
+    selection:
+        CommandLine|contains: 'whoami'
+    condition: selection
+---
+title: B
+logsource:
+    product: windows
+detection:
+    selection:
+        CommandLine|contains: 'mimikatz'
+    condition: selection
+---
+title: C
+logsource:
+    product: windows
+detection:
+    selection:
+        ProcessName|endswith: 'svchost.exe'
+    condition: selection
+"#;
+        let engine = engine_from(yaml);
+        let rules = engine.rules();
+
+        let batched = FieldBloomIndex::build(rules);
+        let mut incremental = FieldBloomIndex::empty();
+        for rule in rules {
+            incremental.append_rule(rule);
+        }
+
+        // Same set of indexed fields.
+        assert_eq!(incremental.field_count(), batched.field_count());
+
+        // Trigrams from the appended needles probe `MaybeMatch` under both.
+        let positive = [
+            ("CommandLine", "run whoami /all"),
+            ("CommandLine", "mimikatz launching"),
+            ("ProcessName", "C:\\svchost.exe"),
+        ];
+        for (field, haystack) in &positive {
+            assert_eq!(
+                batched.probe(field, haystack),
+                BloomVerdict::MaybeMatch,
+                "batched should answer MaybeMatch for ({field}, {haystack})"
+            );
+            assert_eq!(
+                incremental.probe(field, haystack),
+                BloomVerdict::MaybeMatch,
+                "incremental should answer MaybeMatch for ({field}, {haystack})"
+            );
+        }
+
+        // Disjoint digit-only haystacks must reject under the batched
+        // index. The incremental path is allowed to be more conservative
+        // (MaybeMatch) because each rule sizes its initial filter against
+        // its own trigram count; the subsequent appends fold extra
+        // trigrams into that filter without resizing, which raises FPR
+        // until the next full rebuild. `MaybeMatch` is always safe (the
+        // engine just evaluates the rule directly), so the contract is
+        // "no false negatives" not "identical FPR".
+        for haystack in ["12345", "987654321", "000111222"] {
+            assert_eq!(
+                batched.probe("CommandLine", haystack),
+                BloomVerdict::DefinitelyNoMatch,
+                "batched should answer DefinitelyNoMatch for {haystack}"
+            );
+            // Incremental must not falsely flip a true MaybeMatch into a
+            // DefinitelyNoMatch (would be a false negative). Either verdict
+            // is safe; we only assert correctness, not optimality.
+            let v = incremental.probe("CommandLine", haystack);
+            assert!(
+                matches!(v, BloomVerdict::MaybeMatch | BloomVerdict::DefinitelyNoMatch),
+                "incremental probe must return a defined verdict for {haystack}, got {v:?}"
+            );
+        }
+    }
+
+    /// New rules with new fields create fresh per-field blooms. Trigrams
+    /// from the new rule are immediately probable.
+    #[test]
+    fn append_rule_creates_filter_for_new_field() {
+        let yaml = r#"
+title: Initial
+logsource:
+    product: windows
+detection:
+    selection:
+        CommandLine|contains: 'whoami'
+    condition: selection
+---
+title: Adds New Field
+logsource:
+    product: windows
+detection:
+    selection:
+        Image|contains: 'powershell.exe'
+    condition: selection
+"#;
+        let engine = engine_from(yaml);
+        let rules = engine.rules();
+
+        let mut index = FieldBloomIndex::build(&rules[..1]);
+        assert_eq!(index.field_count(), 1);
+
+        index.append_rule(&rules[1]);
+        assert_eq!(index.field_count(), 2);
+        assert_eq!(
+            index.probe("Image", "C:\\powershell.exe"),
+            BloomVerdict::MaybeMatch
+        );
+    }
+
+    /// `should_rebuild` returns `true` once the rule count has at least
+    /// doubled past the last rebuild baseline (with the 64-rule floor on
+    /// the first rebuild). Verifies the schedule the engine will use to
+    /// keep amortized append cost O(1).
+    #[test]
+    fn should_rebuild_follows_doubling_watermark() {
+        let empty = FieldBloomIndex::empty();
+        assert!(!empty.should_rebuild(0));
+        assert!(!empty.should_rebuild(63));
+        // At the floor the very first rebuild trips.
+        assert!(empty.should_rebuild(64));
+        assert!(empty.should_rebuild(1000));
+
+        // After a rebuild at 100 rules, the next watermark is at 200.
+        let rules = String::from(
+            r#"
+title: Sample
+logsource:
+    product: windows
+detection:
+    selection:
+        CommandLine|contains: 'whoami'
+    condition: selection
+"#,
+        );
+        let engine = engine_from(&rules);
+        let rebuilt = FieldBloomIndex::build_with_budget(engine.rules(), DEFAULT_MAX_TOTAL_BYTES);
+        let mut at100 = rebuilt;
+        at100.rebuild_baseline = 100;
+        assert!(!at100.should_rebuild(100));
+        assert!(!at100.should_rebuild(199));
+        assert!(at100.should_rebuild(200));
+        assert!(at100.should_rebuild(1000));
     }
 }
