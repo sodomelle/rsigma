@@ -240,12 +240,14 @@ The LynxDB backend produces SPL2-compatible queries. Translation favours the nat
 |---------------|---------------|
 | Field equality | `field=value`, `field="quoted"` |
 | Wildcard `*` | `field=prefix*`, `field=*contains*` |
-| Wildcard `?` | Deferred to `\| where field=~"regex"` |
-| Regex (`\|re`) | Deferred: `\| where field=~"pattern"` |
-| CIDR (`\|cidr`) | Deferred: `\| where cidrmatch("cidr", field)` |
-| Case-sensitive (`\|cased`) | `field=CASE(value)` |
+| Wildcard `?` | Deferred to a `where field=~"regex"` pipeline stage. |
+| Regex (`re` modifier) | Deferred to a `where field=~"pattern"` pipeline stage. |
+| CIDR (`cidr` modifier) | Deferred to a `where cidrmatch("cidr", field)` pipeline stage. |
+| Case-sensitive (`cased` modifier) | `field=CASE(value)` |
 | Boolean AND/OR/NOT | Explicit parenthesisation for LynxDB's non-standard precedence (`NOT > OR > AND`) |
 | IN-list | `field IN (val1, val2, ...)` |
+
+"Deferred" means the feature does not translate to a native LynxDB search term and is instead emitted as an SPL2 pipeline stage downstream of `search`.
 
 ```bash
 rsigma backend convert rules/ -t lynxdb

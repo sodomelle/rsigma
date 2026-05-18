@@ -13,7 +13,7 @@ This page covers the five input modes, event extraction with jq and JSONPath, co
 | Inline JSON | `--event '{"...": "..."}'` | Parse the argument as a single JSON object and evaluate it. |
 | NDJSON file | `--event @path/to/events.ndjson` | Read the file line by line, one event per line. Blank lines are skipped. |
 | EVTX file | `--event @path/to/log.evtx` | Parse the Windows Event Log binary file and evaluate each record. Requires the `evtx` feature. |
-| stdin NDJSON | omit `--event`, pipe via `\|` | Same as the NDJSON file mode but from stdin. Exits after EOF. |
+| stdin NDJSON | omit `--event`; pipe events on stdin | Same as the NDJSON file mode but from stdin. Exits after EOF. |
 | Inline YAML rule from stdin | `rsigma rule stdin` | Different command, used for parsing rules, not events. |
 
 Every mode produces the same `MatchResult` JSON output on stdout, one object per matched event. Stderr carries status lines.
@@ -101,9 +101,9 @@ rsigma engine eval -r rules/ --correlation-event-mode full --max-correlation-eve
 | Flag | Purpose |
 |------|---------|
 | `--suppress 5m` | Suppress duplicate correlation alerts within the window. |
-| `--action alert\|reset` | What to do after a correlation fires: keep state (re-fire on next match) or clear it. |
+| `--action <alert,reset>` | What to do after a correlation fires: `alert` keeps state and re-fires on the next match, `reset` clears the window. |
 | `--no-detections` | Drop detection-level output, only emit correlation results. |
-| `--correlation-event-mode none\|full\|refs` | Whether to include contributing events in correlation output (and how). |
+| `--correlation-event-mode <none,full,refs>` | Whether to include contributing events in correlation output: `none` (zero overhead), `full` (deflate-compressed bodies), `refs` (timestamp + ID only). |
 | `--max-correlation-events N` | Cap the number of events stored per correlation window. Default 10. |
 | `--timestamp-field FIELD` | Add a field name to the front of the timestamp extraction list (default `@timestamp`, `timestamp`, `EventTime`, `TimeCreated`, `eventTime`). |
 

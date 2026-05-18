@@ -126,7 +126,7 @@ Currently shipped backends:
 |---------|-------------|--------|
 | Test | `test` | Backend-neutral text queries (for testing pipelines) |
 | PostgreSQL/TimescaleDB | `postgres`, `postgresql`, `pg` | SQL with five output formats (default, view, timescaledb, continuous_aggregate, sliding_window) |
-| LynxDB | `lynxdb` | SPL2-compatible `FROM <index> \| search ...` |
+| LynxDB | `lynxdb` | SPL2-compatible search syntax (`FROM <index>` followed by a `search` pipeline stage) |
 
 The conversion framework is pluggable via the `Backend` trait, so new backends can be added with a few hundred lines of Rust. See [adding backends](../developers/adding-backends.md).
 

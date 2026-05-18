@@ -10,8 +10,8 @@ Three rewrites run at rule-compile time, transparently. There is no flag to disa
 
 | Pass | What it does | Source |
 |------|--------------|--------|
-| `AhoCorasickSet` collapse | Any `AnyOf` group of 8+ `\|contains` matchers collapses into one Aho-Corasick automaton that scans the haystack in a single pass. Replaces O(N × haystack_len) sequential `str::contains` with O(haystack_len). | [`compiler/optimizer.rs`](https://github.com/timescale/rsigma/blob/main/crates/rsigma-eval/src/compiler/optimizer.rs) |
-| `RegexSet` collapse | Any `AnyOf` group of 3+ `\|re` matchers collapses into a single `regex::RegexSet`. | same |
+| `AhoCorasickSet` collapse | Any `AnyOf` group of 8+ `contains` matchers collapses into one Aho-Corasick automaton that scans the haystack in a single pass. Replaces O(N × haystack_len) sequential `str::contains` with O(haystack_len). | [`compiler/optimizer.rs`](https://github.com/timescale/rsigma/blob/main/crates/rsigma-eval/src/compiler/optimizer.rs) |
+| `RegexSet` collapse | Any `AnyOf` group of 3+ `re` matchers collapses into a single `regex::RegexSet`. | same |
 | `CaseInsensitiveGroup` wrapper | A group whose children are all case-insensitive lowers the haystack once via `ascii_lowercase_cow` and dispatches to the children via `matches_pre_lowered`. Removes the per-child `to_lowercase()` allocation. | same |
 
 Threshold choices come from a Criterion sweep documented in `BENCHMARKS.md` (8 patterns is where the sequential `str::contains` path with `memchr`/Two-Way SIMD acceleration loses to Aho-Corasick on typical haystacks). The compiler invariant is that these are pure rewrites: the optimized tree returns the same `bool` for the same event as the unoptimized tree.

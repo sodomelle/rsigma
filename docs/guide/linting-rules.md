@@ -88,9 +88,9 @@ The fixable rules:
 | `duplicate_tags` | Remove the duplicate tag entry. |
 | `duplicate_references` | Remove the duplicate reference URL. |
 | `duplicate_fields` | Remove the duplicate field name. |
-| `single_value_all_modifier` | Remove the redundant `\|all` modifier. |
-| `all_with_re` | Remove the redundant `\|all` modifier. |
-| `wildcard_only_value` | Replace lone `*` with `\|exists: true`. |
+| `single_value_all_modifier` | Remove the redundant `all` modifier. |
+| `all_with_re` | Remove the redundant `all` modifier. |
+| `wildcard_only_value` | Replace lone `*` with `exists: true`. |
 | `filter_has_level` | Remove the inapplicable `level` field from a filter rule. |
 | `filter_has_status` | Remove the inapplicable `status` field. |
 
