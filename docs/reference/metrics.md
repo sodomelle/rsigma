@@ -1,0 +1,130 @@
+# Prometheus Metrics
+
+The `engine daemon` exposes Prometheus metrics on `GET /metrics` on the same `--api-addr` as the REST API. The full definition catalogue is 27 metric names across three concerns; the runtime exposes the ones that have ever fired in a given process. A startup scrape shows 21 names by default (one of the per-rule counters surfaces immediately because the registry pre-creates it for documentation); the remaining six lazy metrics register on first use of dynamic pipelines or OTLP.
+
+The exact source of truth is the [`daemon/metrics`](https://github.com/timescale/rsigma/blob/main/crates/rsigma-cli/src/daemon/metrics.rs) module.
+
+## Engine core (16 metrics)
+
+These always show up. They cover ingest, matches, queue depth, back-pressure, reloads, and resource usage.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `rsigma_events_processed_total` | counter | — | Total events processed by the engine. |
+| `rsigma_events_parse_errors_total` | counter | — | JSON or log-format parse errors at the source. |
+| `rsigma_detection_matches_total` | counter | — | Total detection matches emitted. |
+| `rsigma_correlation_matches_total` | counter | — | Total correlation matches emitted. |
+| `rsigma_detection_rules_loaded` | gauge | — | Number of detection rules currently loaded. |
+| `rsigma_correlation_rules_loaded` | gauge | — | Number of correlation rules currently loaded. |
+| `rsigma_correlation_state_entries` | gauge | — | Active entries in the correlation state. Watch versus the `max_state_entries` cap (default 100000). |
+| `rsigma_reloads_total` | counter | — | Total reload attempts (file watcher, SIGHUP, `POST /api/v1/reload`). |
+| `rsigma_reloads_failed_total` | counter | — | Reload attempts that produced parse or compile errors. |
+| `rsigma_uptime_seconds` | gauge | — | Daemon uptime in seconds. |
+| `rsigma_input_queue_depth` | gauge | — | Events currently buffered in the source→engine channel. |
+| `rsigma_output_queue_depth` | gauge | — | Results currently buffered in the engine→sink channel. |
+| `rsigma_back_pressure_events_total` | counter | — | Times a source was blocked on a full event channel. |
+| `rsigma_event_processing_seconds` | histogram | — | Per-event processing latency. |
+| `rsigma_pipeline_latency_seconds` | histogram | — | End-to-end latency from event dequeue to sink send. |
+| `rsigma_batch_size` | histogram | — | Number of events processed per batch. |
+| `rsigma_dlq_events_total` | counter | — | Events routed to the dead-letter queue. |
+
+## Per-rule labels (2 metrics, label `rule_id`)
+
+Exposed once at least one detection or correlation has fired. The labels let you alert on a specific rule firing too frequently or going silent.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `rsigma_detection_matches_by_rule_total` | counter | `rule_id` | Detection matches per rule. |
+| `rsigma_correlation_matches_by_rule_total` | counter | `rule_id` | Correlation matches per rule. |
+
+Rules with very high cardinality should not be label-counted; consider pruning rules that fire on every event before they swamp the metrics endpoint.
+
+## Dynamic pipeline sources (5 metrics, label `source_id`)
+
+Exposed when one or more pipelines declare dynamic sources. Counters lazily register on first resolve; gauges register as soon as a source is configured.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `rsigma_source_resolves_total` | counter | `source_id`, `result` (`ok`/`error`) | Total source resolutions, partitioned by outcome. |
+| `rsigma_source_resolve_errors_total` | counter | `source_id`, `kind` (`http_status`, `timeout`, `parse`, `extract`, `resource_limit`, `auth`, `other`) | Categorised resolution failures. |
+| `rsigma_source_resolve_seconds` | histogram | `source_id` | Resolution latency per source. |
+| `rsigma_source_cache_hits_total` | counter | `source_id` | Times cached source data was served on resolution failure. |
+| `rsigma_source_last_resolved_timestamp` | gauge | `source_id` | Unix timestamp of the last successful resolve. Alert on staleness. |
+
+## OTLP (3 metrics)
+
+Exposed when the daemon is built with `daemon-otlp` and an OTLP receiver is active. The lazy ones (`requests_total`, `errors_total`) register on the first request.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `rsigma_otlp_requests_total` | counter | `transport` (`http`/`grpc`), `result` (`ok`/`error`) | OTLP `/v1/logs` request count. |
+| `rsigma_otlp_log_records_total` | counter | — | Log records ingested via OTLP. |
+| `rsigma_otlp_errors_total` | counter | `transport`, `kind` | Categorised OTLP errors. |
+
+## Scrape configuration
+
+Minimum Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: rsigma
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['rsigma.internal:9090']
+```
+
+15-30 s intervals are reasonable. The histograms use the default `prometheus` bucket boundaries; alert on the `_bucket{le="..."}` quantiles you care about rather than the average, which becomes meaningless under bimodal latency.
+
+## Useful alerts
+
+```yaml
+groups:
+  - name: rsigma
+    rules:
+      # Engine cannot keep up.
+      - alert: RsigmaBackPressure
+        expr: rate(rsigma_back_pressure_events_total[5m]) > 0
+        for: 10m
+        labels: {severity: warning}
+
+      # Correlation state above 80% of the default 100000 cap.
+      - alert: RsigmaCorrelationStatePressure
+        expr: rsigma_correlation_state_entries > 80000
+        for: 10m
+        labels: {severity: warning}
+
+      # DLQ taking traffic.
+      - alert: RsigmaDlqVolume
+        expr: rate(rsigma_dlq_events_total[5m]) > 1
+        for: 15m
+        labels: {severity: warning}
+
+      # Reloads failing means rules are broken on disk.
+      - alert: RsigmaReloadsFailing
+        expr: rate(rsigma_reloads_failed_total[5m]) > 0
+        for: 10m
+        labels: {severity: critical}
+
+      # Dynamic source went stale (no successful resolve in 10 minutes).
+      - alert: RsigmaSourceStale
+        expr: time() - rsigma_source_last_resolved_timestamp > 600
+        for: 5m
+        labels: {severity: warning}
+```
+
+## Histograms: bucket guidance
+
+| Metric | Typical p50 | Typical p99 | Notes |
+|--------|-------------|-------------|-------|
+| `rsigma_event_processing_seconds` | 1-30 µs | < 1 ms | Per-event evaluation against the loaded rule set. Spikes correlate with reload events. |
+| `rsigma_pipeline_latency_seconds` | 1-100 µs | < 5 ms | End-to-end from event dequeue to sink send. Dominated by sink latency (file vs NATS). |
+| `rsigma_batch_size` | 1 | 1 | Default `--batch-size 1`. With `--batch-size 64` and load, p50 trends toward 64. |
+
+`event_processing_seconds` p99 above 5 ms is usually a sign of misuse (regex-heavy rules without `--cross-rule-ac`, or many `|all` modifiers).
+
+## See also
+
+- [Observability](../guide/observability.md) for the broader observability story, including the `tracing` event targets that complement these metrics.
+- [Performance Tuning](../guide/performance-tuning.md) for which metric to watch when sizing `--buffer-size`, `--batch-size`, or correlation `max_state_entries`.
+- [Streaming Detection](../guide/streaming-detection.md#prometheus-and-the-http-api) for how the `/metrics` endpoint fits into the broader daemon API.
+- [`daemon/metrics` source](https://github.com/timescale/rsigma/blob/main/crates/rsigma-cli/src/daemon/metrics.rs) for the registry implementation.

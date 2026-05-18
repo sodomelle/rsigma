@@ -17,9 +17,9 @@ This reference documents every subcommand with its flag table, verified examples
 
 Every subcommand accepts one global flag:
 
-| Flag | Default | Effect |
-|------|---------|--------|
-| `--log-format <json\|text>` | unset | Emit structured diagnostic logs to stderr via `tracing-subscriber`. Verbosity controlled by `RUST_LOG` (default `info`). Has no effect on `engine daemon`, which always logs JSON. |
+| Flag | Default | Values | Effect |
+|------|---------|--------|--------|
+| `--log-format` | unset | `json`, `text` | Emit structured diagnostic logs to stderr via `tracing-subscriber`. Verbosity controlled by `RUST_LOG` (default `info`). Has no effect on `engine daemon`, which always logs JSON. |
 
 `--log-format` adds the diagnostic-log stream alongside the existing stdout/stderr output; it never replaces them. See [Observability](../guide/observability.md) for the full RUST_LOG target catalog.
 
@@ -49,7 +49,7 @@ rsigma
 
 The 0.11 release moved twelve flat top-level subcommands into the five groups above. The flat aliases still work in this release but are deprecated. Each call prints a stderr warning that points at the new path.
 
-| Old | New | Removed in |
+| Old | New | Will be removed in |
 |-----|-----|------------|
 | `rsigma eval` | `rsigma engine eval` | v1.0 ([#126](https://github.com/timescale/rsigma/issues/126)) |
 | `rsigma daemon` | `rsigma engine daemon` | v1.0 |
