@@ -29,6 +29,8 @@ rsigma engine daemon -r rules/ \
 
 The subject after the host is the JetStream subject to subscribe to (input) or publish to (output). Wildcards (`*`, `>`) work for input. For output, the subject must be concrete.
 
+The daemon manages JetStream resources for you. On startup it calls `get_or_create_stream` to ensure a stream named `rsigma-<sanitized-subject>` exists (covering the subject filter you passed), and `get_or_create_consumer` for the matching durable consumer. You do not need to pre-create the stream or consumer with the `nats` CLI; if you already have one whose subject filter overlaps the subject you pass to `--input`, JetStream rejects the conflict and the daemon refuses to start.
+
 You can mix and match: read from NATS, write to stdout; or read from stdin, write to NATS; or fan out a single source to multiple sinks via repeated `--output`:
 
 ```bash
@@ -91,7 +93,7 @@ JetStream consumers can start anywhere in the stream history. The daemon exposes
 |------|-----------|
 | `--replay-from-sequence N` | Start at stream sequence number `N`. Useful for resuming after a known checkpoint. |
 | `--replay-from-time TIMESTAMP` | Start from a wall-clock time. ISO 8601 (`2026-05-15T10:00:00Z`). |
-| `--replay-from-latest` | Skip stream history entirely, deliver only new messages. |
+| `--replay-from-latest` | Start at the last message in the stream, then deliver new messages. Maps to JetStream's `DeliverLast` policy. |
 | (none) | Resume from the consumer's last ack position. The default. |
 
 ```bash
@@ -170,9 +172,9 @@ Each DLQ entry is a JSON object:
 
 ```json
 {
-  "original_event": "...",
-  "error": "JSON parse error at line 1, column 47",
-  "timestamp": "2026-05-15T14:23:00Z"
+  "original_event": "NOT JSON at all",
+  "error": "parse error",
+  "timestamp": "2026-05-18T14:19:42.697130+00:00"
 }
 ```
 
