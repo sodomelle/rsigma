@@ -5,6 +5,9 @@ editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/*.vsix
 
+# MkDocs build output
+/site/
+
 # Secrets and credentials
 .env
 .env.*
