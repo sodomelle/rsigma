@@ -159,10 +159,10 @@ Exit codes:
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success. Events were processed cleanly. With `--fail-on-detection`, no rule fired. |
+| 0 | Success. Events were processed cleanly. With `--fail-on-detection`, no rule fired. Per-rule parse errors are logged as warnings and do not change the exit code. |
 | 1 | Findings. With `--fail-on-detection`, at least one detection or correlation fired. |
-| 2 | Rule error. A Sigma rule could not be parsed, compiled, or converted. |
-| 3 | Configuration error. A pipeline file could not be loaded, a CLI argument was invalid. |
+| 2 | The rules path itself could not be read (missing directory, permission denied). Use `rule validate` for a strict gate that fails on per-rule parse or compile errors. |
+| 3 | Configuration error. A pipeline file could not be loaded, a CLI argument was invalid, or a `--suppress` duration was malformed. |
 
 The [CI/CD guide](ci-cd.md) shows how to plug this into GitHub Actions, GitLab CI, and similar systems.
 
