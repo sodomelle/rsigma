@@ -77,7 +77,7 @@ let results = lint_yaml_directory("rules/".as_ref(), &config)?;
 
 for file in &results {
     for w in &file.warnings {
-        println!("{}: [{}] {}", file.path.display(), w.rule.id(), w.message);
+        println!("{}: [{}] {}", file.path.display(), w.rule, w.message);
     }
 }
 ```

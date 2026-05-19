@@ -1,7 +1,5 @@
 nav:
   - Overview: index.md
-  - Architecture: architecture.md
-  - Contributing: contributing.md
   - Testing: testing.md
   - Fuzzing: fuzzing.md
   - Adding Backends: adding-backends.md
