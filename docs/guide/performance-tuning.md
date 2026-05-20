@@ -18,6 +18,32 @@ Threshold choices come from a Criterion sweep documented in the [Benchmarks](../
 
 Because the optimizer is part of compilation, a rule reload picks up any new pattern groupings automatically.
 
+## Rule loading at scale
+
+Loading a large rule corpus is no longer the bottleneck it was in v0.11.x. As of v0.12.0, `Engine::add_rule` and `Engine::add_compiled_rule` are amortized O(1) per call, and the bulk loaders (`Engine::add_rules`, `Engine::extend_compiled_rules`, `Engine::add_collection`) rebuild the inverted index and the per-field bloom filter exactly once per batch instead of once per rule.
+
+| Loader | Single-rule cost | Batched cost | When you use it |
+|--------|------------------|--------------|-----------------|
+| `Engine::add_rule(rule)` | Amortized O(1) | n/a | Streaming rule ingestion (e.g. a control-plane that adds one rule at a time). |
+| `Engine::add_compiled_rule(rule)` | Amortized O(1) | n/a | Same, but for pre-compiled rules. |
+| `Engine::add_rules(iter)` | n/a | One index rebuild at the end | Library callers loading a batch with per-rule compile-error tolerance. |
+| `Engine::add_collection(collection)` | n/a | One index rebuild at the end | `rsigma engine eval` and `rsigma engine daemon`'s rule load. |
+| `Engine::extend_compiled_rules(iter)` | n/a | One index rebuild at the end | Hot-reload of a fully pre-compiled snapshot. |
+
+Concrete numbers from the `rule_load` Criterion group on an Apple M4 Pro (release build):
+
+| Rules   | `add_collection` | `add_rules` | `add_rule` loop |
+|--------:|-----------------:|------------:|----------------:|
+| 1,000   |          1.15 ms |     1.17 ms |         1.64 ms |
+| 10,000  |         11.82 ms |    11.85 ms |        17.23 ms |
+| 100,000 |        121.65 ms |   122.13 ms |       166.07 ms |
+
+Reproduce with `cargo bench -p rsigma-eval --bench eval -- rule_load`. The full SigmaHQ corpus (~3,120 rules) loads in ~120 ms.
+
+**How the bloom rebuild is amortized.** The per-field bloom uses a doubling watermark with a 64-rule floor. A full bloom rebuild only fires when the rule count has at least doubled past the last rebuild, capping false-positive-rate drift while keeping the amortized per-rule cost flat. Rules that introduce a brand-new indexed field get a fresh bloom on the fly. The differential test `append_rule_matches_build_verdicts` pins the property that incremental and batched indexes accept the same haystacks (with the documented MaybeMatch tolerance between rebuilds).
+
+**Caveat: the cross-rule Aho-Corasick index falls back to a full rebuild on `add_rule`.** The daachorse automaton has no incremental update story, so if you enable `--cross-rule-ac` and then call `add_rule` in a loop, each call rebuilds the cross-rule AC. The batched loaders (`add_collection`, `add_rules`, `extend_compiled_rules`) keep the single-rebuild-at-end fast path. For very large rule sets with cross-rule AC on, always batch.
+
 ## Bloom pre-filter for substring-heavy rule sets
 
 The bloom pre-filter is the right knob when:

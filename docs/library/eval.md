@@ -140,6 +140,8 @@ Pipeline transformations can write `rsigma.*` attributes that the engine consume
 | `Engine::set_cross_rule_ac(bool)` | Toggle the cross-rule Aho-Corasick pre-filter. Requires the `daachorse-index` feature. Pays off only on very large pure-substring rule sets. |
 | `Engine::evaluate_batch(&[events])` (with `parallel`) | Batch evaluation. With the `parallel` feature, rayon parallelizes across events internally. |
 
+`Engine::add_rule` and `add_compiled_rule` are amortized O(1) per call (v0.12.0+), so a control-plane that ingests rules one at a time no longer pays an O(N) cost on every push. The bulk loaders (`add_rules`, `extend_compiled_rules`, `add_collection`) rebuild indexes exactly once per batch. If you enable `set_cross_rule_ac(true)`, prefer the bulk loaders since the daachorse automaton has no incremental update.
+
 Decision matrix in [Performance Tuning](../guide/performance-tuning.md). Verified Criterion numbers in [Benchmarks](../benchmarks.md).
 
 ## Error handling
