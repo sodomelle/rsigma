@@ -9,10 +9,14 @@
 //!
 //! Downstream JSON consumers distinguish detection from correlation by the
 //! presence of `correlation_type` (correlation-only) and `matched_fields`
-//! (detection-only). There is no `result_kind` discriminator on the wire.
-//! Phase 0 of the unification refactor measured this design's serialize
-//! throughput within ±4% of the previous two-struct layout on representative
-//! inputs.
+//! (detection-only). The field set, values, and `skip_serializing_if`
+//! behavior match the pre-unification `MatchResult` / `CorrelationResult`
+//! layout; the only visible difference is that a non-empty
+//! `custom_attributes` map is now emitted between header and body fields
+//! rather than at the end of the line, which is invisible to compliant
+//! JSON consumers (objects are unordered per spec). The wire-shape golden
+//! tests under `crates/rsigma-eval/tests/wire_shape_golden.rs` pin the
+//! new ordering for both kinds.
 
 use std::collections::HashMap;
 use std::sync::Arc;

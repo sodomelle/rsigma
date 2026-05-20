@@ -3,13 +3,12 @@
 //! These tests pin the exact byte-for-byte serialization of one detection
 //! result and one correlation result. They guarantee:
 //!
-//! 1. Both kinds serialize to a single flat top-level JSON object (no
-//!    `result_kind` discriminator was added by the unification refactor).
+//! 1. Both kinds serialize to a single flat top-level JSON object.
 //! 2. Detection lines carry `matched_fields` / `matched_selections` and no
 //!    `correlation_type` field; correlation lines carry `correlation_type`
 //!    and no `matched_fields` field. Downstream NDJSON consumers
 //!    disambiguate by these fields.
-//! 3. Field ordering and `skip_serializing_if` behavior match what every
+//! 3. `skip_serializing_if` behavior and field set match what every
 //!    existing sink (file, stdout, NATS) has always emitted.
 //!
 //! If a future refactor changes the wire shape, these tests fail loudly.
@@ -152,5 +151,40 @@ fn enrichments_some_serializes_at_top_level() {
     assert_eq!(
         enr["runbook_url"].as_str(),
         Some("https://wiki.internal/runbooks/abc123")
+    );
+}
+
+/// With a non-empty `custom_attributes` map, the field flattens from
+/// `RuleHeader` and is emitted between the rule-header fields and the
+/// kind-specific body fields rather than at the end of the line.
+///
+/// JSON objects are unordered per spec, so compliant consumers do not
+/// care; this test pins the actual byte ordering so any future change
+/// is intentional, never silent.
+#[test]
+fn detection_with_custom_attributes_emits_after_tags_before_body() {
+    let mut custom = HashMap::new();
+    custom.insert("severity_score".to_string(), serde_json::json!(42));
+
+    let mut h = header("Detection With Custom Attributes");
+    h.custom_attributes = Arc::new(custom);
+
+    let result = EvaluationResult {
+        header: h,
+        body: ResultBody::Detection(DetectionBody {
+            matched_selections: vec!["selection".to_string()],
+            matched_fields: vec![FieldMatch {
+                field: "EventID".to_string(),
+                value: serde_json::json!(1),
+            }],
+            event: None,
+        }),
+    };
+
+    let actual = serde_json::to_string(&result).unwrap();
+    let expected = r#"{"rule_title":"Detection With Custom Attributes","rule_id":"Detection With Custom Attributes-id","level":"high","tags":["attack.execution","attack.t1059.001"],"custom_attributes":{"severity_score":42},"matched_selections":["selection"],"matched_fields":[{"field":"EventID","value":1}]}"#;
+    assert_eq!(
+        actual, expected,
+        "Custom-attributes detection ordering drift. If intentional, update this test."
     );
 }
