@@ -116,33 +116,13 @@ pub async fn run_daemon(config: DaemonConfig) {
     let metrics = Arc::new(Metrics::new());
     let health = HealthState::new();
 
-    // Build the post-evaluation enrichment pipeline now that the
-    // metrics struct (which owns the Prometheus registry) exists.
-    // Failures here exit cleanly because no I/O has started yet.
-    // The pipeline is wrapped in an `ArcSwap` so the SIGHUP / reload
-    // path (below) can swap a new build in place atomically.
+    // The enrichment pipeline is constructed below, after the dynamic
+    // source resolver exists, so `lookup` enrichers can share the
+    // resolver's `Arc<SourceCache>`. We hoist the `ArcSwap` here so
+    // the sink task closure can capture it directly.
     let enrichment_metrics = metrics.clone() as Arc<dyn rsigma_runtime::MetricsHook>;
-    let enrichment_swap: Arc<ArcSwap<Option<Arc<EnrichmentPipeline>>>> = Arc::new(ArcSwap::new(
-        Arc::new(match config.enrichers_path.as_deref() {
-            Some(path) => match super::enrichment::load_enrichers_file(path).and_then(|file| {
-                super::enrichment::build_enrichers_full(file, None, enrichment_metrics.clone())
-            }) {
-                Ok(p) => {
-                    tracing::info!(
-                        enrichers = p.len(),
-                        path = %path.display(),
-                        "Enrichment pipeline loaded"
-                    );
-                    Some(Arc::new(p))
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to build enrichment pipeline");
-                    std::process::exit(crate::exit_code::CONFIG_ERROR);
-                }
-            },
-            None => None,
-        }),
-    ));
+    let enrichment_swap: Arc<ArcSwap<Option<Arc<EnrichmentPipeline>>>> =
+        Arc::new(ArcSwap::new(Arc::new(None)));
 
     // Open SQLite state store if configured
     let state_store = config.state_db.as_ref().map(|path| {
@@ -317,6 +297,35 @@ pub async fn run_daemon(config: DaemonConfig) {
         }
     }
 
+    // Build the post-evaluation enrichment pipeline now that the
+    // dynamic source resolver (if any) has been constructed; `lookup`
+    // enrichers share the resolver's `Arc<SourceCache>` so they read
+    // from the same cache the resolver writes into. Failures here exit
+    // cleanly because no I/O has started yet.
+    let initial_source_cache = source_resolver_val.as_ref().map(|r| r.arc_cache());
+    if let Some(path) = config.enrichers_path.as_ref() {
+        match super::enrichment::load_enrichers_file(path).and_then(|file| {
+            super::enrichment::build_enrichers_full(
+                file,
+                initial_source_cache.clone(),
+                enrichment_metrics.clone(),
+            )
+        }) {
+            Ok(p) => {
+                tracing::info!(
+                    enrichers = p.len(),
+                    path = %path.display(),
+                    "Enrichment pipeline loaded"
+                );
+                enrichment_swap.store(Arc::new(Some(Arc::new(p))));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to build enrichment pipeline");
+                std::process::exit(crate::exit_code::CONFIG_ERROR);
+            }
+        }
+    }
+
     // Bounded channel acts as backpressure for reload requests. Capacity 4
     // allows the file watcher, SIGHUP handler, and HTTP endpoint to queue
     // reloads without blocking, while the consumer debounces with a 500ms
@@ -426,6 +435,7 @@ pub async fn run_daemon(config: DaemonConfig) {
     let reload_enrichment_swap = enrichment_swap.clone();
     let reload_enrichers_path = config.enrichers_path.clone();
     let reload_enrichment_metrics = enrichment_metrics.clone();
+    let reload_source_cache = initial_source_cache.clone();
     tokio::spawn(async move {
         while reload_rx.recv().await.is_some() {
             // Debounce: batch rapid file changes
@@ -465,7 +475,7 @@ pub async fn run_daemon(config: DaemonConfig) {
                 match super::enrichment::load_enrichers_file(path).and_then(|file| {
                     super::enrichment::build_enrichers_full(
                         file,
-                        None,
+                        reload_source_cache.clone(),
                         reload_enrichment_metrics.clone(),
                     )
                 }) {
