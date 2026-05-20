@@ -103,6 +103,11 @@ RSigma is the only Sigma toolkit that combines pySigma-style conversion with a r
 
     [DEW #154](https://www.detectionengineering.net/i/195467950/state-of-the-art)
 
+!!! quote "Detection Engineering Weekly #157 (May 2026)"
+    "Instead of hardcoding IOC values in rule YAML, you declare external sources in the pipeline config, and RSigma fetches and injects them at evaluation time. This works very similarly to how I've seen SIEMs implement threat intelligence pipelines, but since it's RSigma, it's self-contained within its ecosystem."
+
+    [DEW #157](https://www.detectionengineering.net/p/dew-157-shai-hulud-goes-open-source)
+
 ## Built with RSigma
 
 <div class="grid cards" markdown>
