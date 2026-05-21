@@ -53,8 +53,7 @@ pub(crate) fn cmd_validate(args: ValidateArgs) {
     };
 
     if resolve_sources {
-        let has_dynamic =
-            pipelines.iter().any(|p| p.is_dynamic()) || !external_sources.is_empty();
+        let has_dynamic = pipelines.iter().any(|p| p.is_dynamic()) || !external_sources.is_empty();
         if has_dynamic {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -69,13 +68,13 @@ pub(crate) fn cmd_validate(args: ValidateArgs) {
             let mut source_errors: Vec<String> = Vec::new();
 
             // Resolve external sources first so they populate the cache
-            if !external_sources.is_empty() {
-                if let Err(e) = rt.block_on(rsigma_runtime::sources::resolve_all(
+            if !external_sources.is_empty()
+                && let Err(e) = rt.block_on(rsigma_runtime::sources::resolve_all(
                     &resolver,
                     &external_sources,
-                )) {
-                    source_errors.push(format!("external sources: {e}"));
-                }
+                ))
+            {
+                source_errors.push(format!("external sources: {e}"));
             }
 
             for pipeline in &pipelines {

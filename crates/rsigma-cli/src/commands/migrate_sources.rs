@@ -49,12 +49,7 @@ pub(crate) fn cmd_migrate_sources(args: MigrateSourcesArgs) {
             let mut files: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| {
-                    matches!(
-                        p.extension().and_then(|e| e.to_str()),
-                        Some("yml" | "yaml")
-                    )
-                })
+                .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("yml" | "yaml")))
                 .collect();
             files.sort();
             pipeline_files.extend(files);
@@ -154,11 +149,11 @@ pub(crate) fn cmd_migrate_sources(args: MigrateSourcesArgs) {
             );
         }
         "per-pipeline" => {
-            if !output.exists() {
-                if let Err(e) = std::fs::create_dir_all(&output) {
-                    eprintln!("Error creating directory {}: {e}", output.display());
-                    std::process::exit(crate::exit_code::CONFIG_ERROR);
-                }
+            if !output.exists()
+                && let Err(e) = std::fs::create_dir_all(&output)
+            {
+                eprintln!("Error creating directory {}: {e}", output.display());
+                std::process::exit(crate::exit_code::CONFIG_ERROR);
             }
             for (pipeline_path, sources) in &per_pipeline {
                 if sources.is_empty() {
@@ -190,10 +185,7 @@ pub(crate) fn cmd_migrate_sources(args: MigrateSourcesArgs) {
         let stripped = remove_sources_block(&content);
         if stripped != content {
             if let Err(e) = std::fs::write(path, &stripped) {
-                eprintln!(
-                    "Warning: could not rewrite {}: {e}",
-                    path.display()
-                );
+                eprintln!("Warning: could not rewrite {}: {e}", path.display());
             } else {
                 eprintln!("Removed sources: block from {}", path.display());
             }
@@ -239,9 +231,7 @@ fn extract_source_yaml(content: &str, source_id: &str) -> String {
         }
 
         // Detect start of our source by looking for `- id: <source_id>`
-        if trimmed.starts_with("- id:")
-            || trimmed.starts_with("-  id:")
-        {
+        if trimmed.starts_with("- id:") || trimmed.starts_with("-  id:") {
             let id_val = trimmed
                 .trim_start_matches("- id:")
                 .trim_start_matches("-  id:")
@@ -265,10 +255,7 @@ fn extract_source_yaml(content: &str, source_id: &str) -> String {
     let start = source_start.unwrap();
     let end = source_end.unwrap_or(lines.len());
 
-    lines[start..end]
-        .iter()
-        .map(|l| format!("{l}\n"))
-        .collect()
+    lines[start..end].iter().map(|l| format!("{l}\n")).collect()
 }
 
 /// Build a complete sources YAML file from extracted entries.
@@ -313,8 +300,7 @@ fn remove_sources_block(content: &str) -> String {
             }
             let indent = line.len() - line.trim_start().len();
             if indent > sources_indent.unwrap_or(0)
-                || trimmed.starts_with('-')
-                    && indent >= sources_indent.unwrap_or(0)
+                || trimmed.starts_with('-') && indent >= sources_indent.unwrap_or(0)
             {
                 continue;
             }
@@ -374,8 +360,7 @@ transformations:
                     .to_string(),
             },
             ExtractedSource {
-                raw_yaml: "  - id: feed_b\n    type: file\n    path: /tmp/data.json\n"
-                    .to_string(),
+                raw_yaml: "  - id: feed_b\n    type: file\n    path: /tmp/data.json\n".to_string(),
             },
         ];
         let yaml = build_sources_yaml(&sources);
@@ -385,7 +370,12 @@ transformations:
 
         // Must be valid YAML
         let parsed: yaml_serde::Value = yaml_serde::from_str(&yaml).unwrap();
-        assert!(parsed.as_mapping().unwrap().contains_key(&yaml_serde::Value::String("sources".to_string())));
+        assert!(
+            parsed
+                .as_mapping()
+                .unwrap()
+                .contains_key(yaml_serde::Value::String("sources".to_string()))
+        );
     }
 
     #[test]

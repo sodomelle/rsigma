@@ -69,10 +69,10 @@ async fn resolve_async(
     match load_external_sources(&source_files) {
         Ok(external) => {
             for (source, path) in external {
-                if let Some(ref filter) = source_filter {
-                    if source.id != *filter {
-                        continue;
-                    }
+                if let Some(ref filter) = source_filter
+                    && source.id != *filter
+                {
+                    continue;
                 }
                 all_sources.push((format!("external:{}", path.display()), source));
             }

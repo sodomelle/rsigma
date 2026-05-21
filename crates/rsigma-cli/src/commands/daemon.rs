@@ -516,13 +516,11 @@ fn run_daemon(
         .collect();
 
     // Load external sources and build the daemon-wide registry.
-    let external_sources =
-        rsigma_runtime::sources::registry::load_external_sources(&source_paths).unwrap_or_else(
-            |e| {
-                eprintln!("Error loading external sources: {e}");
-                process::exit(exit_code::CONFIG_ERROR);
-            },
-        );
+    let external_sources = rsigma_runtime::sources::registry::load_external_sources(&source_paths)
+        .unwrap_or_else(|e| {
+            eprintln!("Error loading external sources: {e}");
+            process::exit(exit_code::CONFIG_ERROR);
+        });
 
     let pipeline_sources: Vec<_> = pipelines
         .iter()
