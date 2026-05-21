@@ -51,10 +51,12 @@ enum LogFormat {
 }
 
 // The new noun-led command groups (`engine`, `rule`, `backend`, `pipeline`)
-// are the source of truth. The flat top-level variants that follow
-// are deprecated aliases kept for one release; each carries `[deprecated]` in
-// its `about` text and prints a stderr warning before forwarding to the same
-// `cmd_*` helper.
+// are the source of truth. The flat top-level variants that follow are
+// deprecated aliases kept around for one more release as undocumented
+// forwarders. Each is marked `#[command(hide = true)]` so it no longer
+// appears in `rsigma --help`, but the dispatch arms below still accept the
+// invocation and print a stderr warning before delegating to the same
+// `cmd_*` helper. These variants are removed entirely at v1.0 (issue #126).
 //
 // We deliberately use a `//` comment (not `///`) so clap does not promote it
 // to the top-level `--help` `about` text and override the explicit
@@ -86,44 +88,54 @@ enum Commands {
         cmd: PipelineCommands,
     },
 
-    // ---- Deprecated flat aliases (visible this release, hidden next) ----
+    // ---- Deprecated flat aliases (hidden from `--help`, still functional) ----
     /// [deprecated] Use `rsigma engine eval` instead
+    #[command(hide = true)]
     Eval(EvalArgs),
 
     /// [deprecated] Use `rsigma engine daemon` instead
     #[cfg(feature = "daemon")]
+    #[command(hide = true)]
     Daemon(DaemonArgs),
 
     /// [deprecated] Use `rsigma rule parse` instead
+    #[command(hide = true)]
     Parse(ParseArgs),
 
     /// [deprecated] Use `rsigma rule validate` instead
+    #[command(hide = true)]
     Validate(ValidateArgs),
 
     /// [deprecated] Use `rsigma rule lint` instead
+    #[command(hide = true)]
     Lint(LintArgs),
 
     /// [deprecated] Use `rsigma rule fields` instead
+    #[command(hide = true)]
     Fields(FieldsArgs),
 
     /// [deprecated] Use `rsigma rule condition` instead
+    #[command(hide = true)]
     Condition(ConditionArgs),
 
     /// [deprecated] Use `rsigma rule stdin` instead
+    #[command(hide = true)]
     Stdin(StdinArgs),
 
     /// [deprecated] Use `rsigma backend convert` instead
+    #[command(hide = true)]
     Convert(ConvertArgs),
 
     /// [deprecated] Use `rsigma backend targets` instead
-    #[command(name = "list-targets")]
+    #[command(name = "list-targets", hide = true)]
     ListTargets,
 
     /// [deprecated] Use `rsigma backend formats` instead
-    #[command(name = "list-formats")]
+    #[command(name = "list-formats", hide = true)]
     ListFormats(ListFormatsArgs),
 
     /// [deprecated] Use `rsigma pipeline resolve` instead
+    #[command(hide = true)]
     Resolve(ResolveArgs),
 }
 
@@ -208,7 +220,7 @@ fn main() {
 fn deprecation_warn(old: &str, new: &str) {
     eprintln!(
         "warning: `rsigma {old}` is deprecated; use `rsigma {new}` instead. \
-         This alias will be hidden in the next release and removed in v1.0."
+         This alias is hidden from `--help` and will be removed in v1.0."
     );
 }
 

@@ -2,8 +2,9 @@
 //!
 //! Each deprecated alias (`eval`, `daemon`, `parse`, `validate`, `lint`,
 //! `fields`, `condition`, `stdin`, `convert`, `list-targets`, `list-formats`,
-//! `resolve`) must keep working for one release before it is hidden in the
-//! next and removed in v1.0. This file asserts that:
+//! `resolve`) is hidden from `rsigma --help` but kept as a functional
+//! forwarder until v1.0 ([issue #126](https://github.com/timescale/rsigma/issues/126)).
+//! This file asserts that:
 //!
 //! 1. The flat invocation still succeeds (or fails with the same exit code
 //!    as the new grouped form for error paths).
@@ -11,8 +12,9 @@
 //!    message on stderr.
 //! 3. Where it makes sense (cheap stateless commands), the flat form
 //!    produces the same stdout as the new grouped form.
-//! 4. `rsigma --help` lists every deprecated alias with `[deprecated]` in
-//!    its about text, plus the five new groups.
+//! 4. `rsigma --help` lists only the four new groups (`engine`, `rule`,
+//!    `backend`, `pipeline`) plus `help`, and does NOT list any deprecated
+//!    alias.
 //! 5. Each new group's own `--help` lists the leaf subcommands.
 
 mod common;
@@ -27,38 +29,55 @@ const DEPRECATION_PREFIX: &str = "warning: `rsigma ";
 // ---------------------------------------------------------------------------
 
 #[test]
-fn root_help_lists_all_groups_and_deprecated_aliases() {
+fn root_help_hides_deprecated_aliases() {
     let assert = rsigma()
         .args(["--help"])
         .assert()
         .success()
-        // New groups appear with their short description.
+        // The four new groups still appear in the Commands list.
         .stdout(predicate::str::contains("engine"))
         .stdout(predicate::str::contains("rule"))
         .stdout(predicate::str::contains("backend"))
         .stdout(predicate::str::contains("pipeline"))
-        // Every deprecated alias keeps its row and is tagged `[deprecated]`.
-        .stdout(predicate::str::contains("[deprecated]"));
+        // The `[deprecated]` tag is no longer rendered anywhere because every
+        // alias that carried it is now hidden.
+        .stdout(predicate::str::contains("[deprecated]").not());
 
-    let output = assert.get_output();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The Commands block ends at the first blank line after "Commands:". Scope
+    // the alias-absence check to that block so we don't trip on substring hits
+    // elsewhere in the help output (e.g. `--log-format` mentioning `engine
+    // daemon`, or the `--input-format` flag mentioning `stdin`).
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let commands_block = stdout
+        .split_once("Commands:")
+        .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+        .expect("`Commands:` header should appear in `rsigma --help`");
+
+    // The single-word `eval`, `daemon`, `lint`, etc. would otherwise be
+    // substrings of `engine eval`, `engine daemon`, `rule lint`, etc.; the
+    // grouped form lives under each group's own `--help`, not the root one,
+    // so each token only appears in the root help if its deprecated alias
+    // is still rendered. Match the leading two-space indent + alias as a
+    // standalone command name in the Commands block.
     for alias in [
-        "eval",
-        "daemon",
-        "parse",
-        "validate",
-        "lint",
-        "fields",
-        "condition",
-        "stdin",
-        "convert",
-        "list-targets",
-        "list-formats",
-        "resolve",
+        "  eval ",
+        "  daemon ",
+        "  parse ",
+        "  validate ",
+        "  lint ",
+        "  fields ",
+        "  condition ",
+        "  stdin ",
+        "  convert ",
+        "  list-targets",
+        "  list-formats",
+        "  resolve ",
     ] {
         assert!(
-            stdout.contains(alias),
-            "`{alias}` should appear in `rsigma --help`, got:\n{stdout}"
+            !commands_block.contains(alias),
+            "deprecated alias `{}` should NOT appear in `rsigma --help` Commands block, got:\n{}",
+            alias.trim(),
+            commands_block,
         );
     }
 }
@@ -276,28 +295,21 @@ fn deprecated_list_formats_warns_and_matches_backend_formats() {
 // Daemon and resolve deprecation
 // ---------------------------------------------------------------------------
 
-/// `rsigma daemon` is the heaviest deprecated alias. We only assert that
-/// `--help` on the alias prints the deprecation warning and the same flag
-/// list as `engine daemon --help`. Spawning a real daemon is covered by
+/// `rsigma daemon` is the heaviest deprecated alias. Even though it is hidden
+/// from `rsigma --help`, the alias-specific `--help` page must still render so
+/// scripts that pass `--help` keep working through the deprecation window. We
+/// assert that `rsigma daemon --help` is reachable and surfaces the same flag
+/// list as `rsigma engine daemon --help`. Spawning a real daemon is covered by
 /// `cli_daemon.rs` (which already uses the new path).
 #[cfg(feature = "daemon")]
 #[test]
-fn deprecated_daemon_help_lists_new_path() {
+fn deprecated_daemon_help_still_works() {
     rsigma()
         .args(["daemon", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--rules"))
         .stdout(predicate::str::contains("--input"));
-
-    // The about line tags the flat form as deprecated.
-    rsigma()
-        .args(["--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "daemon        [deprecated] Use `rsigma engine daemon` instead",
-        ));
 }
 
 #[cfg(feature = "daemon")]

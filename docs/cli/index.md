@@ -45,9 +45,9 @@ rsigma
     └── resolve                offline source resolution + dry-run for dynamic pipelines
 ```
 
-## Migration from flat subcommands (pre-0.11)
+## Migration from flat subcommands
 
-The 0.11 release moved twelve flat top-level subcommands into the five groups above. The flat aliases still work in this release but are deprecated. Each call prints a stderr warning that points at the new path.
+Twelve flat top-level subcommands were moved into the four groups above. The flat aliases are hidden from `rsigma --help` but kept as functional forwarders: each call still runs and prints a stderr migration warning pointing at the new path. `rsigma <alias> --help` is still routable so scripts that introspect a subcommand keep working through the deprecation window.
 
 | Old | New | Will be removed in |
 |-----|-----|------------|
@@ -63,8 +63,6 @@ The 0.11 release moved twelve flat top-level subcommands into the five groups ab
 | `rsigma list-targets` | `rsigma backend targets` | v1.0 |
 | `rsigma list-formats` | `rsigma backend formats` | v1.0 |
 | `rsigma resolve` | `rsigma pipeline resolve` | v1.0 |
-
-The intermediate visibility-only step (hide aliases from `--help` but keep them functional) is tracked in [#125](https://github.com/timescale/rsigma/issues/125).
 
 A scripted migration is one `sed`:
 

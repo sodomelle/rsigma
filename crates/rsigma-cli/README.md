@@ -49,7 +49,7 @@ Commands are grouped into four noun-led groups: `engine` (eval / daemon), `rule`
 
 ### Migrating from the old flat commands
 
-Every flat top-level command still works for one release as a visible-deprecated alias. Invoking the old form prints a stderr warning and forwards to the same implementation; stdout, exit codes, and every flag are unchanged.
+Every flat top-level command still works as a hidden, undocumented forwarder. Invoking the old form prints a stderr warning and dispatches to the same implementation; stdout, exit codes, and every flag are unchanged. The aliases no longer appear in `rsigma --help`, but `rsigma <alias> --help` is still routable so existing scripts that introspect a subcommand keep working.
 
 | Old (flat, deprecated) | New (grouped) |
 |------------------------|---------------|
@@ -66,7 +66,7 @@ Every flat top-level command still works for one release as a visible-deprecated
 | `rsigma list-formats TARGET` | `rsigma backend formats TARGET` |
 | `rsigma resolve ...` | `rsigma pipeline resolve ...` |
 
-Deprecation timeline: flat aliases are **visible** in `rsigma --help` this release (with `[deprecated]` in the about text), **hidden** from `--help` in the next release, and **removed** in v1.0. Migrate at your convenience within that window.
+Deprecation timeline: flat aliases are **hidden** from `rsigma --help` but stay functional with a stderr migration warning, and will be **removed** in v1.0. Migrate at your convenience within that window.
 
 ### `rule parse`: Parse a single rule
 

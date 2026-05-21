@@ -157,7 +157,7 @@ The RSigma CLI has been reorganized into noun-led command groups so it can scale
 | `backend` | `convert`, `targets`, `formats` | Generate backend-native queries. |
 | `pipeline` | `resolve` | Test dynamic pipeline source resolution. |
 
-The previous flat commands (`rsigma eval`, `rsigma daemon`, ...) still work for one release as deprecated aliases. See the [CLI reference](../cli/index.md) for the full migration table.
+The previous flat commands (`rsigma eval`, `rsigma daemon`, ...) still work as hidden deprecated aliases that print a migration warning on stderr and forward to the new path; they are removed in v1.0. See the [CLI reference](../cli/index.md) for the full migration table.
 
 ## Output
 
