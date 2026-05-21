@@ -64,11 +64,21 @@ const EMPLOYEES_JSON: &str = r#"{
 
 /// Build the platform-portable `command:` argv for the test's `command`
 /// enricher. On Unix, runs `cat <fixture>`; on Windows, runs
-/// `cmd.exe /C type "<fixture>"`. Returns a YAML inline list literal
-/// ready to splice into the config.
+/// `cmd.exe /D /C type <fixture>` as four separate argv elements.
+/// Returns a YAML inline list literal ready to splice into the config.
 ///
 /// The fixture file holds the JSON body the enricher should produce,
 /// avoiding cross-shell quote-escaping headaches.
+///
+/// **Windows note:** the path goes in its own argv element rather than
+/// being baked into a `type "..."` blob. That avoids cmd.exe's `/C`
+/// quote-stripping pathology, which otherwise leaves cmd trying to
+/// open a file with literal `\"...\"` characters at both ends after
+/// Rust's `CreateProcess` quoting and cmd's outer-quote-stripping
+/// rule interact. With separate args, Rust quotes only the path
+/// element (when it contains spaces), cmd's `type` receives a single
+/// clean path argument, and the file is read normally. `/D` disables
+/// AutoRun for hermeticity.
 fn command_argv_yaml(probe_path: &str) -> String {
     #[cfg(unix)]
     {
@@ -76,11 +86,10 @@ fn command_argv_yaml(probe_path: &str) -> String {
     }
     #[cfg(windows)]
     {
-        // Forward slashes work fine inside `type "..."` on cmd.exe and
-        // make the YAML escaping simple. The JSON-like quoting around
-        // the YAML element handles spaces in temp paths.
-        let win_path = probe_path.replace('\\', "/");
-        format!(r#"["cmd.exe", "/C", "type \"{win_path}\""]"#)
+        // Escape backslashes for the YAML double-quoted string so each
+        // `\\` decodes back to a single `\` in the parsed path.
+        let yaml_escaped = probe_path.replace('\\', "\\\\");
+        format!(r#"["cmd.exe", "/D", "/C", "type", "{yaml_escaped}"]"#)
     }
 }
 
