@@ -519,6 +519,38 @@ impl MetricsHook for Metrics {
             .with_label_values(&[enricher_id])
             .inc();
     }
+
+    fn register_enricher(&self, enricher_id: &str, kind: &str) {
+        // Pre-create label sets so `# HELP` / `# TYPE` lines for the
+        // per-enricher metrics show up on the first /metrics scrape,
+        // even before the enricher has fired. `inc_by(0)` and a
+        // bare `with_label_values` both materialise the entry; the
+        // former is more explicit about the intent.
+        for status in ["success", "skip", "error", "timeout", "drop"] {
+            self.enrichment_total
+                .with_label_values(&[enricher_id, kind, status])
+                .inc_by(0);
+        }
+        // HistogramVec materialises its buckets in `with_label_values`
+        // without observing, so this is side-effect-free: the metric
+        // appears with all-zero buckets and `_count == 0` until the
+        // first `observe(...)` call.
+        let _ = self
+            .enrichment_duration_seconds
+            .with_label_values(&[enricher_id, kind]);
+    }
+
+    fn register_http_enricher_cache(&self, enricher_id: &str) {
+        self.enrichment_http_cache_hits_total
+            .with_label_values(&[enricher_id])
+            .inc_by(0);
+        self.enrichment_http_cache_misses_total
+            .with_label_values(&[enricher_id])
+            .inc_by(0);
+        self.enrichment_http_cache_expirations_total
+            .with_label_values(&[enricher_id])
+            .inc_by(0);
+    }
 }
 
 #[cfg(test)]

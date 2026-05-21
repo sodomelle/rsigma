@@ -284,7 +284,16 @@ impl EnrichmentPipeline {
     /// Replace the metrics hook this pipeline reports into. The daemon
     /// passes its Prometheus-backed `Metrics` here; library consumers
     /// can pass any [`MetricsHook`] implementation.
+    ///
+    /// Pre-registers `(enricher_id, kind)` for every configured
+    /// enricher so `rsigma_enrichment_total{...}` and
+    /// `rsigma_enrichment_duration_seconds{...}` are emitted on
+    /// `/metrics` from the first scrape, even before any enricher has
+    /// fired.
     pub fn with_metrics(mut self, metrics: Arc<dyn MetricsHook>) -> Self {
+        for enricher in &self.enrichers {
+            metrics.register_enricher(enricher.id(), enricher.kind().as_str());
+        }
         self.metrics = metrics;
         self
     }

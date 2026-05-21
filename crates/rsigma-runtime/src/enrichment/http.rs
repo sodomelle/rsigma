@@ -125,7 +125,13 @@ impl HttpEnricher {
     }
 
     /// Replace the metrics hook this enricher reports cache events into.
+    ///
+    /// Pre-registers the three HTTP-cache counter label sets for this
+    /// enricher's `id` so `rsigma_enrichment_http_cache_{hits,misses,
+    /// expirations}_total{...}` are emitted on `/metrics` from the
+    /// first scrape, even before the enricher has run.
     pub fn with_metrics(mut self, metrics: Arc<dyn MetricsHook>) -> Self {
+        metrics.register_http_enricher_cache(&self.id);
         self.metrics = metrics;
         self
     }
