@@ -452,13 +452,8 @@ fn build_one(
             let cache = source_cache.ok_or(EnrichersConfigError::MissingField {
                 enricher_id: cfg.id.clone(),
                 type_name: cfg.type_name.clone(),
-                // Surfaced when the daemon has no dynamic sources
-                // configured but an operator declared a lookup enricher
-                // anyway. Intentionally declaration-site-neutral so the
-                // error reads correctly regardless of whether the
-                // operator declares sources inline in a pipeline file or
-                // via the daemon-level source registry.
-                field: "<source_cache: no dynamic sources configured>",
+                field: "<source_cache: no dynamic sources configured; \
+                        pass --source <file> to the daemon to declare sources>",
             })?;
             let extract = build_extract_expr(&cfg)?;
             Ok(Box::new(LookupEnricher::new(

@@ -1188,8 +1188,7 @@ pub fn validate_source_refs(
         .iter()
         .filter(|r| {
             !declared.contains(r.source_id.as_str())
-                && !external_ids
-                    .map_or(false, |ext| ext.contains(r.source_id.as_str()))
+                && !external_ids.map_or(false, |ext| ext.contains(r.source_id.as_str()))
         })
         .map(|r| r.source_id.as_str())
         .collect::<std::collections::HashSet<&str>>()

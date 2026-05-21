@@ -23,6 +23,10 @@ pub(crate) struct ValidateArgs {
     /// Sources must be reachable (file/command/HTTP) for validation to pass.
     #[arg(long = "resolve-sources")]
     pub resolve_sources: bool,
+
+    /// External source file(s) or directory of source files
+    #[arg(long = "source", value_name = "FILE_OR_DIR")]
+    pub source_files: Vec<PathBuf>,
 }
 
 pub(crate) fn cmd_validate(args: ValidateArgs) {
@@ -31,11 +35,26 @@ pub(crate) fn cmd_validate(args: ValidateArgs) {
         verbose,
         pipelines: pipeline_paths,
         resolve_sources,
+        source_files,
     } = args;
     let mut pipelines = crate::load_pipelines(&pipeline_paths);
 
+    // Load and resolve external sources alongside pipeline-embedded ones
+    let external_sources = if !source_files.is_empty() {
+        match rsigma_runtime::sources::registry::load_external_sources(&source_files) {
+            Ok(ext) => ext.into_iter().map(|(s, _)| s).collect::<Vec<_>>(),
+            Err(e) => {
+                eprintln!("Error loading external sources: {e}");
+                process::exit(crate::exit_code::CONFIG_ERROR);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     if resolve_sources {
-        let has_dynamic = pipelines.iter().any(|p| p.is_dynamic());
+        let has_dynamic =
+            pipelines.iter().any(|p| p.is_dynamic()) || !external_sources.is_empty();
         if has_dynamic {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -48,6 +67,16 @@ pub(crate) fn cmd_validate(args: ValidateArgs) {
             let resolver = rsigma_runtime::DefaultSourceResolver::new();
             let mut resolved_pipelines = Vec::with_capacity(pipelines.len());
             let mut source_errors: Vec<String> = Vec::new();
+
+            // Resolve external sources first so they populate the cache
+            if !external_sources.is_empty() {
+                if let Err(e) = rt.block_on(rsigma_runtime::sources::resolve_all(
+                    &resolver,
+                    &external_sources,
+                )) {
+                    source_errors.push(format!("external sources: {e}"));
+                }
+            }
 
             for pipeline in &pipelines {
                 if pipeline.is_dynamic() {
