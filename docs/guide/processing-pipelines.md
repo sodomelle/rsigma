@@ -214,7 +214,14 @@ The use cases are concrete:
 
 ### Source declaration
 
-Add a `sources` section to your pipeline YAML. Each source has a type, a configuration, an extraction expression, and a refresh policy. Substitution into the pipeline is wired through `vars:`, which the runtime expands with the resolved data; rules then reference the resulting values via standard `%placeholder%` syntax handled by the `value_placeholders` transformation:
+!!! warning "Deprecated location"
+    Declaring sources inline in a pipeline file is deprecated. The recommended
+    approach is to declare sources in a standalone YAML file loaded via
+    `--source` on the daemon. See [External source files](../reference/dynamic-sources.md#external-source-files-recommended)
+    for the recommended approach, and run `rsigma rule migrate-sources` to
+    extract existing inline sources.
+
+Add a `sources` section to your pipeline YAML (or, preferably, a standalone source file loaded via `--source`). Each source has a type, a configuration, an extraction expression, and a refresh policy. Substitution into the pipeline is wired through `vars:`, which the runtime expands with the resolved data; rules then reference the resulting values via standard `%placeholder%` syntax handled by the `value_placeholders` transformation:
 
 ```yaml
 name: dynamic_threat_intel

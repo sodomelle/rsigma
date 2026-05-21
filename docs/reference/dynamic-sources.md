@@ -6,7 +6,56 @@ For an introduction to the feature see [Processing Pipelines: dynamic pipelines]
 
 ## Source declaration
 
-A pipeline declares zero or more sources in a top-level `sources:` block. Each entry is a YAML mapping:
+### External source files (recommended)
+
+The recommended way to declare dynamic sources is in standalone YAML files loaded via the `--source` flag on the daemon (or `--source-file` on `pipeline resolve`). This decouples source declarations from pipeline files and avoids the pipeline YAML becoming a kitchen sink for unrelated configuration.
+
+Each file has a top-level `sources:` block:
+
+```yaml
+# sources.yml
+sources:
+  - id: employee_directory
+    type: file
+    path: ./data/employees.json
+    format: json
+  - id: kev_catalog
+    type: http
+    url: https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+    format: json
+    extract: ".vulnerabilities"
+    refresh: 1h
+```
+
+Pass it to the daemon:
+
+```bash
+rsigma engine daemon -r rules/ -p pipeline.yml --source sources.yml
+```
+
+A directory path loads all `*.yml`/`*.yaml` files in it, sorted alphabetically:
+
+```bash
+rsigma engine daemon -r rules/ -p pipeline.yml --source sources.d/
+```
+
+The flag is repeatable, so you can load from multiple files and directories:
+
+```bash
+rsigma engine daemon -r rules/ -p pipeline.yml \
+    --source infra-sources.yml \
+    --source threat-intel-sources.yml
+```
+
+### Pipeline-embedded sources (deprecated)
+
+!!! warning "Deprecated"
+    Declaring sources inside a pipeline file's `sources:` block is deprecated.
+    Use external source files with `--source` instead.
+    Run `rsigma rule migrate-sources` to extract existing pipeline sources
+    into a standalone file. Pipeline-embedded sources will be removed in v1.0.
+
+A pipeline can still declare zero or more sources in a top-level `sources:` block. Each entry is a YAML mapping:
 
 ```yaml
 name: dynamic_threat_intel
@@ -26,7 +75,23 @@ sources:
     max_stdout: <bytes>       # command type only
 ```
 
-The full Rust type lives at [`rsigma_eval::pipeline::sources::DynamicSource`](https://github.com/timescale/rsigma/blob/main/crates/rsigma-eval/src/pipeline/sources.rs). The parser is at [`rsigma_eval::pipeline::parsing`](https://github.com/timescale/rsigma/blob/main/crates/rsigma-eval/src/pipeline/parsing.rs).
+### Source schema
+
+The schema for each source entry is the same regardless of whether it's declared in an external file or a pipeline. The full Rust type lives at [`rsigma_eval::pipeline::sources::DynamicSource`](https://github.com/timescale/rsigma/blob/main/crates/rsigma-eval/src/pipeline/sources.rs). The parser is at [`rsigma_eval::pipeline::parsing`](https://github.com/timescale/rsigma/blob/main/crates/rsigma-eval/src/pipeline/parsing.rs).
+
+### Collision semantics
+
+Source IDs must be unique across all `--source` files and all pipeline-embedded `sources:` blocks. If the same ID appears in two different declaration sites, the daemon exits at startup with an error naming both file paths. This ensures operators have one canonical declaration site per source ID.
+
+### Migration tool
+
+To migrate existing pipeline-embedded sources to standalone files:
+
+```bash
+rsigma rule migrate-sources -p pipelines/ -o sources.yml
+```
+
+This extracts every `sources:` block from pipeline files in the input directory, consolidates them into a single output file (deduplicating by ID), and rewrites the pipeline files with the `sources:` block removed. Use `--strategy per-pipeline` to create one output file per pipeline instead.
 
 ## Source types
 
