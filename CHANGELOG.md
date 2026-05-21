@@ -5,11 +5,21 @@ Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma
 
 ## [Unreleased]
 
+### Deprecated CLI aliases hidden from `--help` (#125)
+
+The 12 flat top-level CLI aliases (`eval`, `daemon`, `parse`, `validate`, `lint`, `fields`, `condition`, `stdin`, `convert`, `list-targets`, `list-formats`, `resolve`) introduced as visible-deprecated forwarders in v0.12.0 (PR #124) are now hidden from `rsigma --help` via `#[command(hide = true)]`. The dispatch arms and the `deprecation_warn` helper are otherwise unchanged, so:
+
+- Every alias still runs successfully and still prints the migration warning on stderr.
+- `rsigma <alias> --help` is still routable and renders the same flag list as the new grouped form, so scripts that introspect a subcommand keep working.
+- `rsigma --help` now lists only the four noun-led groups (`engine`, `rule`, `backend`, `pipeline`) plus `help`.
+
+The warning text was updated from "This alias will be hidden in the next release and removed in v1.0." to "This alias is hidden from `--help` and will be removed in v1.0." to reflect the new lifecycle stage. Removal at v1.0 is tracked in #126.
+
 ### Detached dynamic sources (#135)
 
 Dynamic source declarations are decoupled from pipeline YAML files. Sources are now a first-class daemon-level concept declared in standalone YAML files and loaded via the new `--source <file_or_dir>` flag (repeatable). Both pipelines and enrichers reference sources by `source_id` as before; the daemon resolves them through a unified `DaemonSourceRegistry` that enforces collision-error semantics (same ID in two sites is a startup error with both paths in the message).
 
-**Pipeline-embedded `sources:` is deprecated.** Existing pipeline files that declare `sources:` continue to work but emit a `tracing::warn!` at parse time recommending `--source` and `rsigma rule migrate-sources`. The deprecation follows the same three-release cycle as the CLI command groups (#125, #126): visible-deprecated this release, hidden from docs next release (#136), removed at v1.0 (#137).
+**Pipeline-embedded `sources:` is deprecated.** Existing pipeline files that declare `sources:` continue to work but emit a `tracing::warn!` at parse time recommending `--source` and `rsigma rule migrate-sources`. The deprecation runs over three releases: visible-deprecated this release, hidden from docs next release (#136), removed at v1.0 (#137).
 
 **New subcommand.** `rsigma rule migrate-sources -p <pipeline-dir> -o <out>` extracts every pipeline-embedded `sources:` block into a standalone file, deduplicating by source ID with collision detection, and rewrites the pipeline files with the `sources:` block removed. Supports `--strategy single` (default, one consolidated file) and `--strategy per-pipeline`.
 
