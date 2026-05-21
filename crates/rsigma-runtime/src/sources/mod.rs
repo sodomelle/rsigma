@@ -13,6 +13,7 @@ pub mod include;
 #[cfg(feature = "nats")]
 pub mod nats;
 pub mod refresh;
+pub mod registry;
 pub mod template;
 
 use std::time::{Duration, Instant};

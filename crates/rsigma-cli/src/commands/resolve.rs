@@ -26,6 +26,10 @@ pub struct ResolveArgs {
     /// Show what would be resolved without performing resolution
     #[arg(long = "dry-run")]
     pub dry_run: bool,
+
+    /// External source file(s) or directory of source files
+    #[arg(long = "source-file", value_name = "FILE_OR_DIR")]
+    pub source_files: Vec<PathBuf>,
 }
 
 pub fn cmd_resolve(args: ResolveArgs) {
@@ -34,6 +38,7 @@ pub fn cmd_resolve(args: ResolveArgs) {
         source: source_filter,
         pretty,
         dry_run,
+        source_files,
     } = args;
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -44,7 +49,9 @@ pub fn cmd_resolve(args: ResolveArgs) {
             std::process::exit(crate::exit_code::CONFIG_ERROR);
         });
 
-    rt.block_on(async { resolve_async(pipeline_paths, source_filter, pretty, dry_run).await });
+    rt.block_on(async {
+        resolve_async(pipeline_paths, source_filter, pretty, dry_run, source_files).await
+    });
 }
 
 async fn resolve_async(
@@ -52,8 +59,29 @@ async fn resolve_async(
     source_filter: Option<String>,
     pretty: bool,
     dry_run: bool,
+    source_files: Vec<PathBuf>,
 ) {
+    use rsigma_runtime::sources::registry::load_external_sources;
+
     let mut all_sources = Vec::new();
+
+    // Load external sources from --source-file flags
+    match load_external_sources(&source_files) {
+        Ok(external) => {
+            for (source, path) in external {
+                if let Some(ref filter) = source_filter
+                    && source.id != *filter
+                {
+                    continue;
+                }
+                all_sources.push((format!("external:{}", path.display()), source));
+            }
+        }
+        Err(e) => {
+            eprintln!("Error loading external sources: {e}");
+            std::process::exit(crate::exit_code::CONFIG_ERROR);
+        }
+    }
 
     for path in &pipeline_paths {
         let pipeline = match parse_pipeline_file(path) {
@@ -64,7 +92,7 @@ async fn resolve_async(
             }
         };
 
-        if !pipeline.is_dynamic() {
+        if !pipeline.is_dynamic() && source_files.is_empty() {
             eprintln!(
                 "Pipeline '{}' has no dynamic sources, skipping.",
                 pipeline.name
@@ -86,7 +114,7 @@ async fn resolve_async(
         if source_filter.is_some() {
             eprintln!("No sources matched the filter.");
         } else {
-            eprintln!("No dynamic sources found in the provided pipelines.");
+            eprintln!("No dynamic sources found in the provided pipelines or source files.");
         }
         std::process::exit(crate::exit_code::RULE_ERROR);
     }

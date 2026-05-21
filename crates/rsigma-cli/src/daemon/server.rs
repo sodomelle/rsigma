@@ -64,6 +64,8 @@ struct AppState {
     /// Channel for OTLP event ingestion. Always set when daemon-otlp is compiled in.
     #[cfg(feature = "daemon-otlp")]
     otlp_event_tx: mpsc::Sender<RawEvent>,
+    /// The daemon-wide source registry for API endpoints.
+    source_registry: Arc<rsigma_runtime::sources::registry::DaemonSourceRegistry>,
 }
 
 #[derive(Clone)]
@@ -110,6 +112,10 @@ pub struct DaemonConfig {
     /// / `POST /api/v1/reload`); failures during reload are logged and
     /// the previous pipeline stays active.
     pub enrichers_path: Option<PathBuf>,
+    /// Daemon-scoped source registry built from `--source` flags and
+    /// pipeline-embedded `sources:` blocks. Collision-checked at
+    /// construction time.
+    pub source_registry: rsigma_runtime::sources::registry::DaemonSourceRegistry,
 }
 
 pub async fn run_daemon(config: DaemonConfig) {
@@ -149,8 +155,10 @@ pub async fn run_daemon(config: DaemonConfig) {
     #[cfg(feature = "daachorse-index")]
     engine.set_cross_rule_ac(config.cross_rule_ac);
 
-    // Set up dynamic source resolver if any pipeline has dynamic sources
-    let has_dynamic = config.pipelines.iter().any(|p| p.is_dynamic());
+    // Set up dynamic source resolver if the registry has sources or any
+    // pipeline references external sources.
+    let has_dynamic =
+        !config.source_registry.is_empty() || config.pipelines.iter().any(|p| p.is_dynamic());
     let mut sources_trigger_tx_val: Option<
         mpsc::Sender<rsigma_runtime::sources::refresh::RefreshTrigger>,
     > = None;
@@ -172,12 +180,41 @@ pub async fn run_daemon(config: DaemonConfig) {
             std::process::exit(crate::exit_code::CONFIG_ERROR);
         }
 
-        // Collect all dynamic sources for the refresh scheduler
-        let all_sources: Vec<_> = config
-            .pipelines
+        // Resolve external (registry-only) sources at startup
+        let registry_only_sources: Vec<_> = config
+            .source_registry
+            .entries()
             .iter()
-            .filter(|p| p.is_dynamic())
-            .flat_map(|p| p.sources.iter().cloned())
+            .filter(|e| {
+                matches!(
+                    e.origin,
+                    rsigma_runtime::sources::registry::SourceOrigin::External(_)
+                )
+            })
+            .map(|e| e.source.clone())
+            .collect();
+        if !registry_only_sources.is_empty() {
+            match rsigma_runtime::sources::resolve_all(&*resolver, &registry_only_sources).await {
+                Ok(_) => {
+                    tracing::info!(
+                        count = registry_only_sources.len(),
+                        "External sources resolved at startup"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to resolve required external sources at startup");
+                    std::process::exit(crate::exit_code::CONFIG_ERROR);
+                }
+            }
+        }
+
+        // Collect all dynamic sources for the refresh scheduler: unified
+        // registry instead of iterating pipelines.
+        let all_sources: Vec<_> = config
+            .source_registry
+            .sources()
+            .into_iter()
+            .cloned()
             .collect();
 
         if !all_sources.is_empty() {
@@ -371,6 +408,7 @@ pub async fn run_daemon(config: DaemonConfig) {
         source_resolver: source_resolver_val,
         #[cfg(feature = "daemon-otlp")]
         otlp_event_tx,
+        source_registry: Arc::new(config.source_registry.clone()),
     };
 
     let app = Router::new()
@@ -1326,21 +1364,15 @@ async fn trigger_reload(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn list_sources(State(state): State<AppState>) -> impl IntoResponse {
-    let snapshot = state.processor.engine_snapshot();
-    let guard = snapshot.lock();
-    let pipelines = guard.pipelines();
-
     let mut sources_info = Vec::new();
-    for pipeline in pipelines {
-        for source in &pipeline.sources {
-            sources_info.push(serde_json::json!({
-                "source_id": source.id,
-                "pipeline": pipeline.name,
-                "type": format!("{:?}", source.source_type).split('{').next().unwrap_or("Unknown").trim(),
-                "refresh": format!("{:?}", source.refresh),
-                "required": source.required,
-            }));
-        }
+    for entry in state.source_registry.entries() {
+        sources_info.push(serde_json::json!({
+            "source_id": entry.source.id,
+            "origin": entry.origin.to_string(),
+            "type": format!("{:?}", entry.source.source_type).split('{').next().unwrap_or("Unknown").trim(),
+            "refresh": format!("{:?}", entry.source.refresh),
+            "required": entry.source.required,
+        }));
     }
 
     Json(serde_json::json!({ "sources": sources_info }))

@@ -259,6 +259,19 @@ pub(crate) struct DaemonArgs {
     /// has a malformed `scope:` rejects the daemon with a clear error.
     #[arg(long = "enrichers", value_name = "PATH")]
     pub enrichers: Option<PathBuf>,
+
+    /// External source file(s) or directory of source files.
+    ///
+    /// Repeatable. Loads dynamic source declarations independently of
+    /// any pipeline file. A file path loads one YAML file with a
+    /// top-level `sources:` block; a directory path loads all
+    /// `*.yml`/`*.yaml` files in it, alphabetically.
+    ///
+    /// Source IDs must be unique across all `--source` files and all
+    /// pipeline-embedded `sources:` blocks; collisions are a startup
+    /// error.
+    #[arg(long = "source", value_name = "FILE_OR_DIR")]
+    pub sources: Vec<PathBuf>,
 }
 
 /// Helper struct grouping NATS connection / auth flags so `cmd_daemon` does
@@ -334,6 +347,7 @@ pub(crate) fn cmd_daemon(args: DaemonArgs) {
         #[cfg(feature = "daachorse-index")]
         cross_rule_ac,
         enrichers,
+        sources: source_paths,
     } = args;
 
     #[cfg(feature = "daemon-nats")]
@@ -410,6 +424,7 @@ pub(crate) fn cmd_daemon(args: DaemonArgs) {
         #[cfg(feature = "daachorse-index")]
         cross_rule_ac,
         enrichers,
+        source_paths,
     );
 }
 
@@ -448,6 +463,7 @@ fn run_daemon(
     bloom_max_bytes: Option<usize>,
     #[cfg(feature = "daachorse-index")] cross_rule_ac: bool,
     enrichers_path: Option<PathBuf>,
+    source_paths: Vec<PathBuf>,
 ) {
     use rsigma_eval::resolve_builtin_pipeline;
 
@@ -499,6 +515,45 @@ fn run_daemon(
         .filter(|p| resolve_builtin_pipeline(p.to_str().unwrap_or("")).is_none())
         .collect();
 
+    // Load external sources and build the daemon-wide registry.
+    let external_sources = rsigma_runtime::sources::registry::load_external_sources(&source_paths)
+        .unwrap_or_else(|e| {
+            eprintln!("Error loading external sources: {e}");
+            process::exit(exit_code::CONFIG_ERROR);
+        });
+
+    let pipeline_sources: Vec<_> = pipelines
+        .iter()
+        .flat_map(|p| {
+            p.sources
+                .iter()
+                .map(|s| (s.clone(), p.name.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    if !pipeline_sources.is_empty() {
+        for p in &pipelines {
+            if !p.sources.is_empty() {
+                tracing::warn!(
+                    pipeline = %p.name,
+                    "pipeline declares inline 'sources:' block, which is deprecated; \
+                     use '--source <file>' instead. Run 'rsigma rule migrate-sources' \
+                     to extract sources into a standalone file."
+                );
+            }
+        }
+    }
+
+    let source_registry = rsigma_runtime::sources::registry::DaemonSourceRegistry::new(
+        external_sources,
+        pipeline_sources,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Source ID collision: {e}");
+        process::exit(exit_code::CONFIG_ERROR);
+    });
+
     let config = daemon::server::DaemonConfig {
         rules_path,
         pipelines,
@@ -530,6 +585,7 @@ fn run_daemon(
         #[cfg(feature = "daachorse-index")]
         cross_rule_ac,
         enrichers_path,
+        source_registry,
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()

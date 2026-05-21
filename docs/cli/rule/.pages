@@ -6,3 +6,4 @@ nav:
   - fields: fields.md
   - condition: condition.md
   - stdin: stdin.md
+  - migrate-sources: migrate-sources.md

@@ -122,7 +122,8 @@ pub use pipeline::{
     builtin::{
         builtin_names as builtin_pipeline_names, resolve_builtin as resolve_builtin_pipeline,
     },
-    merge_pipelines, parse_pipeline, parse_pipeline_file, parse_transformation_items,
+    merge_pipelines, parse_pipeline, parse_pipeline_file, parse_sources_dir, parse_sources_file,
+    parse_transformation_items, validate_source_refs,
 };
 pub use result::{
     CorrelationBody, DetectionBody, EvaluationResult, FieldMatch, ProcessResultExt, ResultBody,

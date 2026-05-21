@@ -76,7 +76,7 @@ fn parse_pipeline_value(value: &yaml_serde::Value) -> Result<Pipeline> {
 
     let source_refs = scan_source_refs(obj);
 
-    validate_source_refs(&sources, &source_refs)?;
+    validate_source_refs(&sources, &source_refs, None)?;
 
     Ok(Pipeline {
         name,
@@ -846,7 +846,7 @@ fn parse_finalizers(value: &yaml_serde::Value) -> Vec<Finalizer> {
 // =============================================================================
 
 /// Parse the `sources` section of a pipeline YAML.
-fn parse_sources(value: &yaml_serde::Value) -> Result<Vec<DynamicSource>> {
+pub fn parse_sources(value: &yaml_serde::Value) -> Result<Vec<DynamicSource>> {
     let items = value
         .as_sequence()
         .ok_or_else(|| EvalError::InvalidModifiers("sources must be a sequence".to_string()))?;
@@ -855,7 +855,7 @@ fn parse_sources(value: &yaml_serde::Value) -> Result<Vec<DynamicSource>> {
 }
 
 /// Parse a single dynamic source declaration.
-fn parse_dynamic_source(value: &yaml_serde::Value) -> Result<DynamicSource> {
+pub fn parse_dynamic_source(value: &yaml_serde::Value) -> Result<DynamicSource> {
     let obj = value
         .as_mapping()
         .ok_or_else(|| EvalError::InvalidModifiers("source must be a mapping".to_string()))?;
@@ -975,6 +975,57 @@ fn parse_dynamic_source(value: &yaml_serde::Value) -> Result<DynamicSource> {
         required,
         default,
     })
+}
+
+/// Parse a standalone sources YAML file (top-level `sources:` block).
+///
+/// The file shape is:
+/// ```yaml
+/// sources:
+///   - id: employee_directory
+///     type: file
+///     path: ./data/employees.json
+///     format: json
+/// ```
+pub fn parse_sources_file(path: &Path) -> Result<Vec<DynamicSource>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| EvalError::InvalidModifiers(format!("cannot read sources file: {e}")))?;
+    let value: yaml_serde::Value = yaml_serde::from_str(&content)
+        .map_err(|e| EvalError::InvalidModifiers(format!("sources file YAML parse error: {e}")))?;
+    let obj = value.as_mapping().ok_or_else(|| {
+        EvalError::InvalidModifiers("sources file must be a YAML mapping".to_string())
+    })?;
+    match obj.get(ykey("sources")) {
+        Some(items) => parse_sources(items),
+        None => Err(EvalError::InvalidModifiers(
+            "sources file must contain a top-level 'sources:' key".to_string(),
+        )),
+    }
+}
+
+/// Load all `*.yml` and `*.yaml` files from a directory as source files,
+/// sorted alphabetically. Each file must contain a top-level `sources:` block.
+pub fn parse_sources_dir(dir: &Path) -> Result<Vec<DynamicSource>> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| EvalError::InvalidModifiers(format!("cannot read sources directory: {e}")))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            let path = entry.path();
+            matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("yml" | "yaml")
+            )
+        })
+        .collect();
+    entries.sort_by_key(|e| e.path());
+
+    let mut all_sources = Vec::new();
+    for entry in entries {
+        let path = entry.path();
+        let sources = parse_sources_file(&path)?;
+        all_sources.extend(sources);
+    }
+    Ok(all_sources)
 }
 
 /// Parse an `extract` field which can be either:
@@ -1116,8 +1167,17 @@ fn parse_command_field(value: Option<&yaml_serde::Value>) -> Result<Vec<String>>
 // =============================================================================
 
 /// Validate that every `${source.*}` reference and `include` target names a
-/// declared source. Returns an error listing all undeclared source IDs.
-fn validate_source_refs(sources: &[DynamicSource], refs: &[SourceRef]) -> Result<()> {
+/// declared source (pipeline-local or external registry). Returns an error
+/// listing all undeclared source IDs.
+///
+/// `external_ids` is an optional set of source IDs declared outside the
+/// pipeline (via `--source` files). A reference is valid if it matches
+/// either a pipeline-local declaration or an external ID.
+pub fn validate_source_refs(
+    sources: &[DynamicSource],
+    refs: &[SourceRef],
+    external_ids: Option<&std::collections::HashSet<String>>,
+) -> Result<()> {
     if refs.is_empty() {
         return Ok(());
     }
@@ -1126,7 +1186,10 @@ fn validate_source_refs(sources: &[DynamicSource], refs: &[SourceRef]) -> Result
 
     let undeclared: Vec<&str> = refs
         .iter()
-        .filter(|r| !declared.contains(r.source_id.as_str()))
+        .filter(|r| {
+            !declared.contains(r.source_id.as_str())
+                && !external_ids.is_some_and(|ext| ext.contains(r.source_id.as_str()))
+        })
         .map(|r| r.source_id.as_str())
         .collect::<std::collections::HashSet<&str>>()
         .into_iter()
@@ -1158,7 +1221,7 @@ fn source_ref_regex() -> &'static Regex {
 
 /// Scan the entire pipeline YAML for `${source.*}` template references and
 /// `include` directives, returning all found references.
-fn scan_source_refs(obj: &yaml_serde::Mapping) -> Vec<SourceRef> {
+pub(crate) fn scan_source_refs(obj: &yaml_serde::Mapping) -> Vec<SourceRef> {
     let mut refs = Vec::new();
 
     // Scan vars

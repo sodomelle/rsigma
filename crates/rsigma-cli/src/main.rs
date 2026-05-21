@@ -10,7 +10,7 @@ use std::process;
 use clap::{Parser, Subcommand};
 use commands::{
     ConditionArgs, ConvertArgs, EvalArgs, FieldsArgs, LintArgs, LintCounts, ListFormatsArgs,
-    ParseArgs, ResolveArgs, StdinArgs, ValidateArgs,
+    MigrateSourcesArgs, ParseArgs, ResolveArgs, StdinArgs, ValidateArgs,
 };
 #[cfg(feature = "daemon")]
 use commands::{DaemonArgs, cmd_daemon};
@@ -157,6 +157,9 @@ enum RuleCommands {
 
     /// Read Sigma YAML from stdin and print parsed AST as JSON
     Stdin(StdinArgs),
+
+    /// Extract pipeline-embedded sources: into standalone source files
+    MigrateSources(MigrateSourcesArgs),
 }
 
 #[derive(Subcommand)]
@@ -286,6 +289,7 @@ fn dispatch_rule(cmd: RuleCommands) {
         RuleCommands::Fields(args) => commands::cmd_fields(args),
         RuleCommands::Condition(args) => commands::cmd_condition(args),
         RuleCommands::Stdin(args) => commands::cmd_stdin(args),
+        RuleCommands::MigrateSources(args) => commands::cmd_migrate_sources(args),
     }
 }
 
