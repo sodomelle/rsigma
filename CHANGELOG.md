@@ -5,6 +5,46 @@ Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma
 
 ## [Unreleased]
 
+### Post-evaluation enrichment (#134)
+
+The daemon now runs a configurable enrichment pipeline between `engine.evaluate()` and the sinks. Each detection or correlation gets context (asset owner, IP reputation, identity, GeoIP, KEV flag, runbook URL, ...) injected into its `RuleHeader::enrichments` map before serialization, so every downstream consumer sees the same structured data without re-fetching it.
+
+**New flag.** `rsigma engine daemon --enrichers <PATH>` points at a YAML file with `max_concurrent_enrichments: <N>` (default `16`) plus a list of enricher entries. The file is hot-reloaded on `SIGHUP`, file-watcher events, and `POST /api/v1/reload`; a reload that fails validation logs the error and keeps the previous pipeline active, so a typo never silently degrades production to "no enrichment".
+
+**Four primitives.** Every entry declares a `type:` from a fixed set, modeled on what Splunk (`lookup` + `rest`), Cribl Stream (`Lookup` + `HTTP` + `Code` + `Eval`), and Vector (`enrichment_tables` + `remap`) all converged on:
+
+| `type` | Surface |
+|--------|---------|
+| `template` | Pure string interpolation. No I/O. Used for runbook URLs and synthetic identifiers. |
+| `lookup` | Reads a dynamic source (as declared today via pipeline `sources:`) from the existing `Arc<SourceCache>` by `source_id`, with an optional jq / JSONPath / CEL `extract` to slice the cached value and an optional `default` for cache miss or no extract match. Zero-network-cost. |
+| `http` | Per-result `reqwest` request with template-expanded URL, headers, and optional body. Optional response cache keyed on `(method, url, body_hash)` with configurable TTL is mandatory in practice for any rate-limited API. |
+| `command` | Per-result `tokio::process::Command` invocation with template-expanded argv and environment. Stdout capped at 10 MiB; output parsed as JSON (default) or raw string. |
+
+The IRQL-style catalog (`enrich_ip_employee`, `enrich_ip_geoip`, `enrich_hash_virustotal`, `enrich_cve_kev`, `enrich_url_runbook`, `enrich_ip_passive_dns`) ships as field-parametric YAML recipes in `docs/guide/enrichers.md`, not Rust code. External crates that need a Rust-coded named enricher (bundled data, complex parser, stable contract, non-obvious algorithm) register one via the public `register_builtin(name, factory)` API.
+
+**Strict kind separation.** Every enricher declares `kind: detection | correlation`. The kind drives two checks. At config load time, a `kind: detection` enricher may only reference `${detection.*}` template variables and a `kind: correlation` enricher may only reference `${correlation.*}`; cross-namespace references are rejected with a clear error pointing at the offending field. At runtime, the pipeline skips enrichers whose declared kind does not match the current `EvaluationResult` body variant before invoking `enrich()`, so a detection-kind enricher pays no cost on correlation results and vice versa. Available variables are documented in the Kind and template namespaces section of `docs/guide/enrichers.md`.
+
+**`scope` filtering and `on_error` policies.** Within its declared kind, an enricher can be limited via `scope.rules` (rule ID or title glob), `scope.tags` (tag-set intersection with `prefix.*` wildcards), and `scope.levels` (severity membership). Axes are AND-ed; an empty axis is not a filter. On failure, `on_error` selects between `skip` (drop the enrichment, keep the result), `null` (inject `null`), and `drop` (drop the entire result). The default is `skip`, so an enrichment outage never silently swallows detections.
+
+**Six new Prometheus metrics.** All six are pre-registered at startup, so every label triple renders with `# HELP` and `# TYPE` lines and zero counts on the first scrape, before any event has fired:
+
+| Metric | Labels |
+|--------|--------|
+| `rsigma_enrichment_total` | `enricher_id`, `kind`, `status` (`success`/`skip`/`error`/`timeout`/`drop`) |
+| `rsigma_enrichment_duration_seconds` | `enricher_id`, `kind` |
+| `rsigma_enrichment_queue_depth` | -- |
+| `rsigma_enrichment_http_cache_hits_total` | `enricher_id` |
+| `rsigma_enrichment_http_cache_misses_total` | `enricher_id` |
+| `rsigma_enrichment_http_cache_expirations_total` | `enricher_id` |
+
+Filtered (kind- or scope-mismatched) enricher calls do not increment any counter, so cardinality stays bounded by the number of configured enrichers.
+
+**Library API.** `rsigma-runtime` exports the `Enricher` async trait, `EnrichmentPipeline`, `EnricherKind`, `OnError`, `Scope`, the four primitive types (`TemplateEnricher`, `LookupEnricher`, `HttpEnricher`, `CommandEnricher`), `HttpEnricherClient`, `HttpResponseCache`, `OutputFormat`, the `MetricsHook` trait, and the `register_builtin(name, factory)` registry. Reserved names (`template`, `lookup`, `http`, `command`) are rejected at registration time; duplicate registrations of the same name are rejected to keep the registry append-only.
+
+**Documentation.** New `docs/guide/enrichers.md` (config schema, the four primitives, recipes catalog, promotion criteria, output shape, metrics) and `docs/developers/adding-enrichers.md` (testing pattern, metrics wiring, naming conventions). `docs/cli/engine/daemon.md`, `docs/library/runtime.md`, and `docs/reference/metrics.md` updated. The `crates/rsigma-cli/README.md` gains a full enrichment surface section that mirrors the docs-site guide.
+
+**New dependencies.** `humantime` and `arc-swap` in `rsigma-cli` (humantime for `5s` / `1h` duration parsing in the YAML; arc-swap for the hot-reload swap), `globset` and `jaq-core` / `jaq-std` in `rsigma-runtime` (globset for `scope.rules` / `scope.tags` patterns; the jaq additions wire the existing `jaq-interpret` / `jaq-parse` into the enrichment `extract` flow). `wiremock` added as a dev-dependency in both crates for HTTP enricher integration tests.
+
 ### Unified evaluation result type (#132)
 
 `MatchResult` and `CorrelationResult` are collapsed into a single `EvaluationResult` via composition. The five fields shared between detection and correlation today (`rule_title`, `rule_id`, `level`, `tags`, `custom_attributes`) move into a new `RuleHeader` struct along with a new optional `enrichments` map. Kind-specific fields live in `DetectionBody` and `CorrelationBody`, behind a `#[serde(untagged)]` `ResultBody` enum.
