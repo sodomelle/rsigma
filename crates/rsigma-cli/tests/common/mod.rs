@@ -138,6 +138,15 @@ impl DaemonProcess {
             }
         }
 
+        // The daemon may log a wildcard bind address like `0.0.0.0:PORT`
+        // (or `[::]:PORT`). Connecting to a wildcard address returns
+        // `WSAEADDRNOTAVAIL` on Windows. Linux and macOS silently treat
+        // it as loopback, so the same test was green there. Rewrite the
+        // recorded address to the loopback equivalent before probing
+        // and before exposing it via `url()`; the daemon listens on
+        // every interface so loopback is always reachable.
+        let api_addr = rewrite_wildcard_to_loopback(api_addr);
+
         let socket: std::net::SocketAddr = api_addr
             .parse()
             .unwrap_or_else(|e| panic!("invalid api_addr {api_addr:?}: {e}"));
@@ -246,6 +255,24 @@ fn extract_addr(line: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(line)
         .ok()
         .and_then(|v| v["fields"]["addr"].as_str().map(|s| s.to_string()))
+}
+
+/// Rewrite a wildcard bind address (`0.0.0.0:PORT` or `[::]:PORT`) to the
+/// loopback equivalent. Connecting to a wildcard works on Linux/macOS
+/// (silently routed to loopback) but fails with `WSAEADDRNOTAVAIL` on
+/// Windows, which made `public_bind_with_allow_plaintext_starts` flake
+/// only on Windows CI before this rewrite.
+fn rewrite_wildcard_to_loopback(addr: String) -> String {
+    match addr.parse::<std::net::SocketAddr>() {
+        Ok(parsed) if parsed.ip().is_unspecified() => {
+            let port = parsed.port();
+            match parsed {
+                std::net::SocketAddr::V4(_) => format!("127.0.0.1:{port}"),
+                std::net::SocketAddr::V6(_) => format!("[::1]:{port}"),
+            }
+        }
+        _ => addr,
+    }
 }
 
 // ---------------------------------------------------------------------------
