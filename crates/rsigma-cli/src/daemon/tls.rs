@@ -81,6 +81,11 @@ pub struct TlsState {
     /// Atomically swappable `ServerConfig` used by every new handshake.
     pub config: Arc<ArcSwap<ServerConfig>>,
     /// Original CLI config so SIGHUP can re-read cert/key from disk.
+    /// Only read by the SIGHUP handler in [`super::reload::sighup_listener`],
+    /// which is `#[cfg(unix)]`. On Windows the field is intentionally kept
+    /// in the struct so the public type stays platform-agnostic, hence the
+    /// scoped `allow(dead_code)`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub cli: TlsCliConfig,
     /// Unix timestamp (seconds) at which the active cert expires. Updated
     /// on every successful reload so the Prometheus gauge stays accurate.
@@ -104,6 +109,10 @@ impl TlsState {
     /// Returns the new expiry timestamp so callers can update the
     /// Prometheus gauge. The previous config remains active if the
     /// reload fails, mirroring the rules-reload contract.
+    ///
+    /// Only invoked from the `#[cfg(unix)]` SIGHUP path; Windows daemons
+    /// rotate certificates by restarting the process.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn reload(&self) -> Result<i64, TlsError> {
         let new_config = build_server_config(&self.cli)?;
         let new_expiry = read_cert_expiry(&self.cli.cert_path)?;
