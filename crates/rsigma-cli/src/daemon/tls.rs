@@ -15,13 +15,13 @@
 
 #![cfg(feature = "daemon-tls")]
 
-use std::fs;
-use std::io::{self, BufReader};
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -201,11 +201,17 @@ fn build_server_config(cli: &TlsCliConfig) -> Result<ServerConfig, TlsError> {
 }
 
 /// Read a PEM bundle of one or more certificates.
+///
+/// Uses the `PemObject` API from `rustls-pki-types` directly. The
+/// `rustls-pemfile` crate is unmaintained as of RUSTSEC-2025-0134 and
+/// was always a thin wrapper around this same code; consuming it
+/// straight from `rustls-pki-types` avoids the advisory without
+/// changing behavior.
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsError> {
-    let file = fs::File::open(path).map_err(|e| TlsError::Io(e, path.to_path_buf()))?;
-    let mut reader = BufReader::new(file);
-    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
-    let certs = certs.map_err(|e| TlsError::Io(e, path.to_path_buf()))?;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(path)
+        .map_err(|e| pem_error_to_tls(e, path))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| pem_error_to_tls(e, path))?;
     if certs.is_empty() {
         return Err(TlsError::NoCertificates(path.to_path_buf()));
     }
@@ -214,23 +220,15 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsError> {
 
 /// Read a PEM-encoded private key (PKCS#8, RSA, or SEC1/EC).
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsError> {
-    let file = fs::File::open(path).map_err(|e| TlsError::Io(e, path.to_path_buf()))?;
-    let mut reader = BufReader::new(file);
-    let key = rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| TlsError::Io(e, path.to_path_buf()))?
-        .ok_or_else(|| TlsError::NoPrivateKey(path.to_path_buf()))?;
-    Ok(key)
+    PrivateKeyDer::from_pem_file(path).map_err(|e| match e {
+        rustls::pki_types::pem::Error::NoItemsFound => TlsError::NoPrivateKey(path.to_path_buf()),
+        other => pem_error_to_tls(other, path),
+    })
 }
 
 /// Load a PEM bundle of trusted CA certificates for mTLS verification.
 fn load_client_ca_roots(path: &Path) -> Result<RootCertStore, TlsError> {
-    let file = fs::File::open(path).map_err(|e| TlsError::Io(e, path.to_path_buf()))?;
-    let mut reader = BufReader::new(file);
-    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
-    let certs = certs.map_err(|e| TlsError::Io(e, path.to_path_buf()))?;
-    if certs.is_empty() {
-        return Err(TlsError::NoCertificates(path.to_path_buf()));
-    }
+    let certs = load_certs(path)?;
     let mut roots = RootCertStore::empty();
     for (idx, cert) in certs.into_iter().enumerate() {
         roots.add(cert).map_err(|e| {
@@ -238,6 +236,16 @@ fn load_client_ca_roots(path: &Path) -> Result<RootCertStore, TlsError> {
         })?;
     }
     Ok(roots)
+}
+
+/// Translate a `rustls-pki-types` PEM error to our `TlsError` variant,
+/// preserving the source path so the operator-facing message names the
+/// file that failed.
+fn pem_error_to_tls(err: rustls::pki_types::pem::Error, path: &Path) -> TlsError {
+    match err {
+        rustls::pki_types::pem::Error::Io(io_err) => TlsError::Io(io_err, path.to_path_buf()),
+        other => TlsError::InvalidCertificate(path.to_path_buf(), other.to_string()),
+    }
 }
 
 /// Read the leaf certificate from `path` and return its `not_after` as a
