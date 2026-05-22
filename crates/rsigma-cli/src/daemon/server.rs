@@ -488,27 +488,19 @@ pub async fn run_daemon(config: DaemonConfig) {
         tracing::info!(addr = %actual_addr, "API server listening");
     }
 
-    // Spawn SIGHUP listener (triggers rule reload, source re-resolution,
-    // and TLS cert reload when daemon-tls is built in).
+    // Spawn SIGHUP listener (Unix-only; routes the signal into the
+    // same `reload_tx` channel the file watcher and HTTP endpoint
+    // use, so every reload trigger funnels through one task).
     let sighup_reload_tx = reload_tx.clone();
     let sighup_sources_tx = sources_trigger_tx_val.clone();
-    #[cfg(feature = "daemon-tls")]
-    let sighup_tls = tls_state.clone();
-    #[cfg(feature = "daemon-tls")]
-    let sighup_tls_metrics = metrics.clone();
     tokio::spawn(async move {
-        reload::sighup_listener(
-            sighup_reload_tx,
-            sighup_sources_tx,
-            #[cfg(feature = "daemon-tls")]
-            sighup_tls,
-            #[cfg(feature = "daemon-tls")]
-            sighup_tls_metrics,
-        )
-        .await;
+        reload::sighup_listener(sighup_reload_tx, sighup_sources_tx).await;
     });
 
-    // Spawn reload handler — uses LogProcessor::reload_rules for atomic hot-reload
+    // Spawn reload handler — uses LogProcessor::reload_rules for atomic hot-reload.
+    // Also re-reads enricher config and (when `daemon-tls` is built in) the TLS
+    // certificate / key so a single `POST /api/v1/reload`, SIGHUP, or file-watcher
+    // event rotates every hot-reloadable component in one debounced pass.
     let reload_processor = processor.clone();
     let reload_metrics = metrics.clone();
     let reload_health = health.clone();
@@ -516,6 +508,10 @@ pub async fn run_daemon(config: DaemonConfig) {
     let reload_enrichers_path = config.enrichers_path.clone();
     let reload_enrichment_metrics = enrichment_metrics.clone();
     let reload_source_cache = initial_source_cache.clone();
+    #[cfg(feature = "daemon-tls")]
+    let reload_tls_state = tls_state.clone();
+    #[cfg(feature = "daemon-tls")]
+    let reload_tls_metrics = metrics.clone();
     tokio::spawn(async move {
         while reload_rx.recv().await.is_some() {
             // Debounce: batch rapid file changes
@@ -580,6 +576,29 @@ pub async fn run_daemon(config: DaemonConfig) {
                             error = %e,
                             path = %path.display(),
                             "Failed to reload enrichers config; keeping previous pipeline"
+                        );
+                        reload_metrics.reloads_failed.inc();
+                    }
+                }
+            }
+
+            // Reload TLS certificate / key from disk when daemon-tls is
+            // built in and configured. Failures keep the previous
+            // certificate active so a typo in the cert path cannot
+            // black-hole the listener; the operator sees the error in
+            // the daemon log and via `rsigma_reloads_failed_total`.
+            #[cfg(feature = "daemon-tls")]
+            if let Some(ref state) = reload_tls_state {
+                match state.reload() {
+                    Ok(new_expiry) => {
+                        update_tls_metrics(&reload_tls_metrics, new_expiry);
+                        warn_if_cert_expiring_soon(new_expiry);
+                        tracing::info!(not_after = new_expiry, "TLS certificate hot-reloaded");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to reload TLS certificate; keeping previous one active"
                         );
                         reload_metrics.reloads_failed.inc();
                     }

@@ -73,17 +73,20 @@ pub fn spawn_file_watcher(
     Some(watcher)
 }
 
-/// Set up a SIGHUP handler that sends reload signals and source re-resolution
-/// triggers, and (when `daemon-tls` is built in) also re-reads the configured
-/// TLS certificate and key from disk and atomically swaps the rustls
-/// `ServerConfig` so new handshakes pick up the rotated material without
-/// dropping inflight connections.
+/// Set up a SIGHUP handler that signals the central reload task and
+/// kicks off source re-resolution.
+///
+/// SIGHUP just routes the signal into the same `reload_tx` channel the
+/// file watcher and `POST /api/v1/reload` use, so every reload trigger
+/// funnels through the one debounced reload task in `server::run_daemon`.
+/// That task is what actually re-reads rules, enrichers, and (when
+/// `daemon-tls` is built in) the TLS certificate and key. The Windows
+/// build has no SIGHUP equivalent; operators rotate certs via
+/// `POST /api/v1/reload` instead.
 #[cfg(unix)]
 pub async fn sighup_listener(
     reload_tx: mpsc::Sender<()>,
     sources_trigger_tx: Option<mpsc::Sender<rsigma_runtime::sources::refresh::RefreshTrigger>>,
-    #[cfg(feature = "daemon-tls")] tls_state: Option<super::tls::TlsState>,
-    #[cfg(feature = "daemon-tls")] tls_metrics: std::sync::Arc<super::metrics::Metrics>,
 ) {
     use tokio::signal::unix::{SignalKind, signal};
 
@@ -102,23 +105,6 @@ pub async fn sighup_listener(
         if let Some(tx) = &sources_trigger_tx {
             let _ = tx.try_send(rsigma_runtime::sources::refresh::RefreshTrigger::All);
         }
-
-        #[cfg(feature = "daemon-tls")]
-        if let Some(ref state) = tls_state {
-            match state.reload() {
-                Ok(new_expiry) => {
-                    super::server::update_tls_metrics(&tls_metrics, new_expiry);
-                    super::server::warn_if_cert_expiring_soon(new_expiry);
-                    tracing::info!(not_after = new_expiry, "TLS certificate hot-reloaded");
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "Failed to reload TLS certificate; keeping previous one active"
-                    );
-                }
-            }
-        }
     }
 }
 
@@ -126,8 +112,6 @@ pub async fn sighup_listener(
 pub async fn sighup_listener(
     _reload_tx: mpsc::Sender<()>,
     _sources_trigger_tx: Option<mpsc::Sender<rsigma_runtime::sources::refresh::RefreshTrigger>>,
-    #[cfg(feature = "daemon-tls")] _tls_state: Option<super::tls::TlsState>,
-    #[cfg(feature = "daemon-tls")] _tls_metrics: std::sync::Arc<super::metrics::Metrics>,
 ) {
     std::future::pending::<()>().await;
 }
