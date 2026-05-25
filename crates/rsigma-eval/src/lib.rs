@@ -118,7 +118,7 @@ pub use correlation_engine::{
 pub use engine::Engine;
 pub use error::{EvalError, Result};
 pub use event::{Event, EventValue, JsonEvent, KvEvent, MapEvent, PlainEvent};
-pub use field_observer::{FieldObservation, FieldObservationEntry, FieldObserver};
+pub use field_observer::{FieldCoverage, FieldObservation, FieldObservationEntry, FieldObserver};
 pub use fields::{FieldOrigin, FieldSource, RuleFieldSet};
 pub use matcher::CompiledMatcher;
 pub use pipeline::{

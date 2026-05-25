@@ -69,7 +69,8 @@ pub use metrics::{MetricsHook, NoopMetrics};
 pub use processor::{EventFilter, LogProcessor};
 
 pub use rsigma_eval::{
-    FieldObservation, FieldObservationEntry, FieldObserver, ProcessResult, ProcessResultExt,
+    FieldCoverage, FieldObservation, FieldObservationEntry, FieldObserver, ProcessResult,
+    ProcessResultExt,
 };
 pub use sources::refresh::{RefreshResult, RefreshScheduler, RefreshTrigger};
 pub use sources::{

@@ -45,13 +45,14 @@
 //!   [`snapshot`](FieldObserver::snapshot) against a
 //!   [`RuleFieldSet`](crate::RuleFieldSet).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::event::Event;
+use crate::fields::{FieldOrigin, RuleFieldSet};
 
 /// Single field-name counter as exposed via the snapshot API.
 ///
@@ -115,6 +116,61 @@ pub struct FieldObserver {
     /// Monotonic. Never reset. Drives the Prometheus counter bridge.
     lifetime_overflow_dropped: AtomicU64,
     start: Mutex<Instant>,
+}
+
+impl FieldObservation {
+    /// Join the snapshot against a [`RuleFieldSet`] and return the
+    /// partitioned coverage view in a single pass.
+    ///
+    /// Returned references borrow from `self` (the entries) and the
+    /// supplied `rule_field_set` (the missing entries), so this is
+    /// allocation-light: one `Vec` for the unknown borrows, one `Vec`
+    /// for the missing borrows, one `HashSet` for the seen lookup.
+    ///
+    /// Centralises the logic shared between the daemon's
+    /// `GET /api/v1/fields*` handlers and the `engine eval` end-of-run
+    /// report so the two surfaces cannot drift on field semantics.
+    pub fn coverage<'a>(&'a self, rule_field_set: &'a RuleFieldSet) -> FieldCoverage<'a> {
+        let mut unknown: Vec<&'a FieldObservationEntry> = Vec::new();
+        let mut intersection_count: usize = 0;
+        let mut seen: HashSet<&'a str> = HashSet::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let field: &str = &entry.field;
+            seen.insert(field);
+            if rule_field_set.contains(field) {
+                intersection_count += 1;
+            } else {
+                unknown.push(entry);
+            }
+        }
+        let missing: Vec<(&'a str, &'a FieldOrigin)> = rule_field_set
+            .iter()
+            .filter(|(name, _)| !seen.contains(name))
+            .collect();
+        FieldCoverage {
+            unknown,
+            intersection_count,
+            missing,
+        }
+    }
+}
+
+/// Borrowed view over a [`FieldObservation`] joined against a
+/// [`RuleFieldSet`]. Produced by [`FieldObservation::coverage`].
+///
+/// Consumers (the daemon HTTP handlers, the eval report writer) own
+/// the JSON shape; this struct only provides the partitioned data.
+pub struct FieldCoverage<'a> {
+    /// Observed fields not referenced by any loaded rule (gap signal).
+    /// Ordered the same way as [`FieldObservation::entries`]: by
+    /// descending count, then ascending name.
+    pub unknown: Vec<&'a FieldObservationEntry>,
+    /// Count of observed fields that *are* rule-referenced.
+    pub intersection_count: usize,
+    /// Rule field names that have not appeared in any observed event
+    /// (broken-coverage signal), paired with their [`FieldOrigin`] so
+    /// consumers can render rule titles and source kinds.
+    pub missing: Vec<(&'a str, &'a FieldOrigin)>,
 }
 
 impl FieldObserver {
@@ -402,5 +458,101 @@ mod tests {
         assert_eq!(snap.events_observed, 1);
         assert_eq!(snap.unique_keys, 0);
         assert_eq!(snap.overflow_dropped, 0);
+    }
+
+    #[test]
+    fn coverage_partitions_observed_against_rule_set() {
+        // Two rules: one references CommandLine (also matches the event),
+        // the other references ProcessGuid (never appears in the event).
+        // Event carries CommandLine plus two unrelated fields.
+        let yaml = r#"
+title: Whoami
+status: test
+logsource:
+    category: test
+detection:
+    selection:
+        CommandLine|contains: whoami
+    condition: selection
+---
+title: Process Tampering
+status: test
+logsource:
+    category: test
+detection:
+    selection:
+        ProcessGuid: "{abc}"
+    condition: selection
+"#;
+        let collection = rsigma_parser::parse_sigma_yaml(yaml).expect("parse");
+        let rule_field_set = crate::fields::RuleFieldSet::collect(&collection, &[], true);
+        let observer = FieldObserver::new(100);
+        observer.observe(&JsonEvent::borrow(
+            &json!({"CommandLine":"whoami","User":"alice","src_ip":"10.0.0.1"}),
+        ));
+
+        let snap = observer.snapshot();
+        let coverage = snap.coverage(&rule_field_set);
+
+        assert_eq!(coverage.intersection_count, 1, "CommandLine intersects");
+        let unknown: Vec<&str> = coverage
+            .unknown
+            .iter()
+            .map(|e| -> &str { &e.field })
+            .collect();
+        assert!(unknown.contains(&"User"));
+        assert!(unknown.contains(&"src_ip"));
+        assert!(!unknown.contains(&"CommandLine"));
+        let missing: Vec<&str> = coverage.missing.iter().map(|(n, _)| *n).collect();
+        assert!(
+            missing.contains(&"ProcessGuid"),
+            "ProcessGuid was rule-referenced but never observed"
+        );
+        assert!(!missing.contains(&"CommandLine"));
+    }
+
+    #[test]
+    fn coverage_empty_observer_yields_only_missing() {
+        let yaml = r#"
+title: A
+status: test
+logsource:
+    category: test
+detection:
+    selection:
+        FieldA: x
+    condition: selection
+"#;
+        let collection = rsigma_parser::parse_sigma_yaml(yaml).expect("parse");
+        let rule_field_set = crate::fields::RuleFieldSet::collect(&collection, &[], true);
+        let observer = FieldObserver::new(100);
+
+        let snap = observer.snapshot();
+        let coverage = snap.coverage(&rule_field_set);
+        assert_eq!(coverage.intersection_count, 0);
+        assert!(coverage.unknown.is_empty());
+        assert_eq!(coverage.missing.len(), 1);
+        assert_eq!(coverage.missing[0].0, "FieldA");
+    }
+
+    #[test]
+    fn coverage_unknown_preserves_snapshot_ordering() {
+        let observer = FieldObserver::new(100);
+        for _ in 0..3 {
+            observer.observe(&JsonEvent::borrow(&json!({"hot": 1})));
+        }
+        observer.observe(&JsonEvent::borrow(&json!({"warm": 1})));
+        let empty_rule_set = crate::fields::RuleFieldSet::default();
+
+        let snap = observer.snapshot();
+        let coverage = snap.coverage(&empty_rule_set);
+        let order: Vec<&str> = coverage
+            .unknown
+            .iter()
+            .map(|e| -> &str { &e.field })
+            .collect();
+        // Snapshot is already sorted by descending count then ascending
+        // name; coverage's filter-only pass must preserve that order.
+        assert_eq!(order, vec!["hot", "warm"]);
     }
 }

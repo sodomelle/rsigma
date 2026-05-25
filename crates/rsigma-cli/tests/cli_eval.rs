@@ -846,6 +846,50 @@ fn observe_fields_writes_to_stderr_when_no_report_path() {
 }
 
 #[test]
+fn observe_fields_report_without_observe_flag_is_rejected() {
+    // clap `requires` should refuse `--observe-fields-report` when
+    // `--observe-fields` is not also supplied, so a typo at the CLI
+    // surface fails fast instead of silently producing no report.
+    let rule = temp_file(".yml", SIMPLE_RULE);
+    let report_file = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+    rsigma()
+        .args([
+            "engine",
+            "eval",
+            "--rules",
+            rule.path().to_str().unwrap(),
+            "--event",
+            r#"{"CommandLine":"malware"}"#,
+            "--observe-fields-report",
+            report_file.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--observe-fields"));
+}
+
+#[test]
+fn observe_fields_max_keys_zero_is_rejected() {
+    // NonZeroUsize value parser refuses 0; otherwise every observation
+    // would count as overflow with no useful tracking.
+    let rule = temp_file(".yml", SIMPLE_RULE);
+    rsigma()
+        .args([
+            "engine",
+            "eval",
+            "--rules",
+            rule.path().to_str().unwrap(),
+            "--event",
+            r#"{"CommandLine":"malware"}"#,
+            "--observe-fields",
+            "--observe-fields-max-keys",
+            "0",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn observe_fields_off_by_default_emits_no_report() {
     let rule = temp_file(".yml", SIMPLE_RULE);
     let output = rsigma()

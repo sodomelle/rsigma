@@ -1657,17 +1657,6 @@ fn missing_field_payload(field: &str, origin: &rsigma_eval::FieldOrigin) -> serd
     })
 }
 
-fn missing_fields(
-    rule_field_set: &rsigma_eval::RuleFieldSet,
-    seen: &std::collections::HashSet<&str>,
-) -> Vec<serde_json::Value> {
-    rule_field_set
-        .iter()
-        .filter(|(name, _)| !seen.contains(name))
-        .map(|(name, origin)| missing_field_payload(name, origin))
-        .collect()
-}
-
 /// Slice a window out of `items` by moving the page elements out of the
 /// source `Vec` rather than cloning. Returns the page, the original
 /// total (preserved before the move), and the next offset (if any).
@@ -1699,24 +1688,22 @@ async fn fields_full(
     state.metrics.update_field_observer_metrics(&snapshot);
 
     let rule_field_set = state.processor.rule_field_set();
+    let coverage = snapshot.coverage(&rule_field_set);
 
-    // Single pass over the snapshot: partition observed fields into
-    // unknown (not referenced by any rule) and intersection
-    // (referenced by at least one rule), and record which keys we saw
-    // so the missing-set computation can skip them.
-    let mut unknown_entries: Vec<serde_json::Value> = Vec::new();
-    let mut intersection_count: usize = 0;
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for e in &snapshot.entries {
-        let field: &str = &e.field;
-        seen.insert(field);
-        if rule_field_set.contains(field) {
-            intersection_count += 1;
-        } else {
-            unknown_entries.push(serde_json::json!({ "field": field, "count": e.count }));
-        }
-    }
-    let missing_entries = missing_fields(&rule_field_set, &seen);
+    let unknown_entries: Vec<serde_json::Value> = coverage
+        .unknown
+        .iter()
+        .map(|e| {
+            let field: &str = &e.field;
+            serde_json::json!({ "field": field, "count": e.count })
+        })
+        .collect();
+    let missing_entries: Vec<serde_json::Value> = coverage
+        .missing
+        .iter()
+        .map(|(name, origin)| missing_field_payload(name, origin))
+        .collect();
+    let intersection_count = coverage.intersection_count;
 
     let (unknown_page, unknown_total, unknown_next) =
         paginate(unknown_entries, query.offset(), query.limit());
@@ -1766,13 +1753,10 @@ async fn fields_unknown(
 
     let rule_field_set = state.processor.rule_field_set();
 
-    let entries: Vec<serde_json::Value> = snapshot
-        .entries
+    let coverage = snapshot.coverage(&rule_field_set);
+    let entries: Vec<serde_json::Value> = coverage
+        .unknown
         .iter()
-        .filter(|e| {
-            let field: &str = &e.field;
-            !rule_field_set.contains(field)
-        })
         .map(|e| {
             let field: &str = &e.field;
             serde_json::json!({ "field": field, "count": e.count })
@@ -1804,12 +1788,12 @@ async fn fields_missing(
 
     let rule_field_set = state.processor.rule_field_set();
 
-    let seen: std::collections::HashSet<&str> = snapshot
-        .entries
+    let coverage = snapshot.coverage(&rule_field_set);
+    let entries: Vec<serde_json::Value> = coverage
+        .missing
         .iter()
-        .map(|e| -> &str { &e.field })
+        .map(|(name, origin)| missing_field_payload(name, origin))
         .collect();
-    let entries = missing_fields(&rule_field_set, &seen);
     let (page, total, next_offset) = paginate(entries, query.offset(), query.limit());
     (
         StatusCode::OK,

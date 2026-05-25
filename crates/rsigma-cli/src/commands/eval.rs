@@ -142,14 +142,20 @@ pub(crate) struct EvalArgs {
     /// via `overflow_dropped` in the report); existing keys keep
     /// incrementing. Default: 10000. Has no effect unless
     /// `--observe-fields` is set.
-    #[arg(long = "observe-fields-max-keys", default_value_t = 10_000)]
-    pub observe_fields_max_keys: usize,
+    #[arg(
+        long = "observe-fields-max-keys",
+        default_value_t = std::num::NonZeroUsize::new(10_000).unwrap(),
+    )]
+    pub observe_fields_max_keys: std::num::NonZeroUsize,
 
     /// Path to write the field-observation JSON report to. When
     /// omitted (and `--observe-fields` is set) the report is written
     /// to stderr so detections on stdout stay machine-consumable.
-    /// Has no effect unless `--observe-fields` is set.
-    #[arg(long = "observe-fields-report", value_name = "PATH")]
+    #[arg(
+        long = "observe-fields-report",
+        value_name = "PATH",
+        requires = "observe_fields"
+    )]
     pub observe_fields_report: Option<PathBuf>,
 }
 
@@ -254,7 +260,7 @@ pub(crate) fn cmd_eval(args: EvalArgs) -> bool {
     // `add_collection` borrows it.
     let observe_ctx: Option<ObserveContext> = if observe_fields {
         Some(ObserveContext {
-            observer: Arc::new(FieldObserver::new(observe_fields_max_keys)),
+            observer: Arc::new(FieldObserver::new(observe_fields_max_keys.get())),
             rule_field_set: RuleFieldSet::collect(&collection, &pipelines, true),
             report_path: observe_fields_report,
         })
@@ -937,43 +943,39 @@ fn observe_event<E: Event + ?Sized>(ctx: Option<&ObserveContext>, event: &E) {
     }
 }
 
+/// Maximum number of rule titles surfaced per missing-field entry in
+/// the eval report (matches the daemon's `/api/v1/fields/missing`
+/// behaviour). A `truncated: true` flag accompanies any field that
+/// touches more rules than this cap.
+const EVAL_MISSING_RULE_TITLES_CAP: usize = 10;
+
 /// Render the end-of-run field coverage report and write it to the
-/// configured destination (file or stderr).
+/// configured destination (file or stderr). The JSON shape matches
+/// the daemon's `GET /api/v1/fields` payload so CI pipelines can
+/// share a single `jq` query across runtimes.
 fn render_field_report(ctx: &ObserveContext) {
     let snapshot = ctx.observer.snapshot();
+    let coverage = snapshot.coverage(&ctx.rule_field_set);
 
-    // Single pass over the observed entries: partition into the
-    // rule-referenced intersection and the "unknown" gap signal, and
-    // record `seen` so the missing-set computation can skip it.
-    let mut unknown_entries: Vec<serde_json::Value> = Vec::new();
-    let mut intersection_count: usize = 0;
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for e in &snapshot.entries {
-        let field: &str = &e.field;
-        seen.insert(field);
-        if ctx.rule_field_set.contains(field) {
-            intersection_count += 1;
-        } else {
-            unknown_entries.push(serde_json::json!({ "field": field, "count": e.count }));
-        }
-    }
-
-    // Rule fields never observed in the input. Each entry lists up to
-    // ten rule titles plus a `truncated` flag, matching the daemon's
-    // `/api/v1/fields/missing` shape.
-    const MISSING_RULE_TITLES_CAP: usize = 10;
-    let missing_entries: Vec<serde_json::Value> = ctx
-        .rule_field_set
+    let unknown_entries: Vec<serde_json::Value> = coverage
+        .unknown
         .iter()
-        .filter(|(name, _)| !seen.contains(name))
+        .map(|e| {
+            let field: &str = &e.field;
+            serde_json::json!({ "field": field, "count": e.count })
+        })
+        .collect();
+    let missing_entries: Vec<serde_json::Value> = coverage
+        .missing
+        .iter()
         .map(|(name, origin)| {
             let total = origin.rule_titles.len();
-            let truncated = total > MISSING_RULE_TITLES_CAP;
+            let truncated = total > EVAL_MISSING_RULE_TITLES_CAP;
             let rule_titles: Vec<&str> = origin
                 .rule_titles
                 .iter()
                 .map(String::as_str)
-                .take(MISSING_RULE_TITLES_CAP)
+                .take(EVAL_MISSING_RULE_TITLES_CAP)
                 .collect();
             let sources: Vec<&str> = origin.sources.iter().map(|s| s.as_str()).collect();
             serde_json::json!({
@@ -994,7 +996,7 @@ fn render_field_report(ctx: &ObserveContext) {
             "overflow_dropped": snapshot.overflow_dropped,
             "max_keys": snapshot.max_keys,
             "uptime_seconds": snapshot.uptime_seconds,
-            "intersection_count": intersection_count,
+            "intersection_count": coverage.intersection_count,
             "unknown_count": unknown_entries.len(),
             "missing_count": missing_entries.len(),
         },
