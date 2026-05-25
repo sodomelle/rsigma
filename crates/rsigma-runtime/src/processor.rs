@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
-use rsigma_eval::{Event, JsonEvent, ProcessResult, ProcessResultExt};
+use rsigma_eval::{Event, JsonEvent, ProcessResult, ProcessResultExt, RuleFieldSet};
 
 use crate::engine::RuntimeEngine;
 use crate::input::{EventInputDecoded, InputFormat, parse_line};
@@ -331,6 +331,15 @@ impl LogProcessor {
         let snapshot = self.engine.load();
         let engine = snapshot.lock();
         engine.stats()
+    }
+
+    /// Return an immutable snapshot of the current rule field set
+    /// (post-pipeline). The lock is held only long enough to clone the
+    /// `Arc`; the returned value remains valid across reloads.
+    pub fn rule_field_set(&self) -> Arc<RuleFieldSet> {
+        let snapshot = self.engine.load();
+        let engine = snapshot.lock();
+        engine.rule_field_set()
     }
 }
 
