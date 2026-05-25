@@ -12,8 +12,8 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use rsigma_eval::{CorrelationConfig, Pipeline, ProcessResult};
 use rsigma_runtime::{
-    AckToken, EnrichmentPipeline, FileSink, InputFormat, LogProcessor, MetricsHook, RawEvent,
-    RuntimeEngine, Sink, StdinSource, StdoutSink, spawn_source,
+    AckToken, EnrichmentPipeline, FieldObserver, FileSink, InputFormat, LogProcessor, MetricsHook,
+    RawEvent, RuntimeEngine, Sink, StdinSource, StdoutSink, spawn_source,
 };
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -66,6 +66,10 @@ struct AppState {
     otlp_event_tx: mpsc::Sender<RawEvent>,
     /// The daemon-wide source registry for API endpoints.
     source_registry: Arc<rsigma_runtime::sources::registry::DaemonSourceRegistry>,
+    /// Opt-in field observer. `Some` when the daemon was started with
+    /// `--observe-fields`; the engine task records observed field keys
+    /// and the `/api/v1/fields/*` handlers (Phase 4) consume snapshots.
+    field_observer: Option<Arc<FieldObserver>>,
 }
 
 #[derive(Clone)]
@@ -101,6 +105,17 @@ pub struct DaemonConfig {
     /// Optional override for the bloom memory budget (bytes). `None` means
     /// the crate default (1 MB).
     pub bloom_max_bytes: Option<usize>,
+    /// Enable the opt-in field observer that counts every event's field
+    /// keys so the `/api/v1/fields/*` endpoints can surface gap and
+    /// broken-coverage signals. Off by default; when off the engine
+    /// task does not iterate `Event::field_keys` at all.
+    pub observe_fields: bool,
+    /// Hard ceiling on the number of distinct field names tracked by
+    /// the field observer. Once the ceiling is reached, new keys are
+    /// dropped (and counted via
+    /// `rsigma_fields_observer_overflow_dropped_total`); existing keys
+    /// keep incrementing.
+    pub observe_fields_max_keys: usize,
     /// Enable the cross-rule Aho-Corasick pre-filter. Off by default;
     /// benefit is workload-dependent (large rule sets with shared
     /// substring patterns). Available behind the `daachorse-index`
@@ -402,6 +417,18 @@ pub async fn run_daemon(config: DaemonConfig) {
     #[cfg(feature = "daemon-otlp")]
     let otlp_event_tx = event_tx.clone();
 
+    let field_observer = if config.observe_fields {
+        let observer = Arc::new(FieldObserver::new(config.observe_fields_max_keys));
+        processor.set_field_observer(Some(observer.clone()));
+        tracing::info!(
+            max_keys = config.observe_fields_max_keys,
+            "Field observer enabled"
+        );
+        Some(observer)
+    } else {
+        None
+    };
+
     let app_state = AppState {
         processor: processor.clone(),
         metrics: metrics.clone(),
@@ -414,6 +441,7 @@ pub async fn run_daemon(config: DaemonConfig) {
         #[cfg(feature = "daemon-otlp")]
         otlp_event_tx,
         source_registry: Arc::new(config.source_registry.clone()),
+        field_observer: field_observer.clone(),
     };
 
     let app = Router::new()
@@ -1366,6 +1394,11 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         .metrics
         .uptime_seconds
         .set(state.start_time.elapsed().as_secs_f64());
+
+    if let Some(observer) = state.field_observer.as_ref() {
+        let snapshot = observer.snapshot();
+        state.metrics.update_field_observer_metrics(&snapshot);
+    }
 
     (
         [(

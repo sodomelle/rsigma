@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use rsigma_eval::{Event, JsonEvent, ProcessResult, ProcessResultExt, RuleFieldSet};
 
 use crate::engine::RuntimeEngine;
+use crate::field_observer::FieldObserver;
 use crate::input::{EventInputDecoded, InputFormat, parse_line};
 use crate::metrics::MetricsHook;
 
@@ -26,6 +27,11 @@ pub type EventFilter = dyn Fn(&serde_json::Value) -> Vec<serde_json::Value>;
 pub struct LogProcessor {
     engine: Arc<ArcSwap<Mutex<RuntimeEngine>>>,
     metrics: Arc<dyn MetricsHook>,
+    /// Optional opt-in field observer. When `Some`, every parsed event
+    /// flowing through `process_batch_with_format` has its field keys
+    /// recorded. When `None`, the batch path skips iteration entirely
+    /// so the hot path stays untouched.
+    field_observer: ArcSwap<Option<Arc<FieldObserver>>>,
 }
 
 impl LogProcessor {
@@ -34,7 +40,24 @@ impl LogProcessor {
         LogProcessor {
             engine: Arc::new(ArcSwap::from_pointee(Mutex::new(engine))),
             metrics,
+            field_observer: ArcSwap::new(Arc::new(None)),
         }
+    }
+
+    /// Attach (or detach) the opt-in field observer.
+    ///
+    /// When set, [`process_batch_with_format`](Self::process_batch_with_format)
+    /// records each parsed event's field keys before evaluation. Pass
+    /// `None` to disable observation; the hot path then performs zero
+    /// extra work. Safe to call at runtime: the swap is wait-free, and
+    /// in-flight batches finish against whichever observer they read.
+    pub fn set_field_observer(&self, observer: Option<Arc<FieldObserver>>) {
+        self.field_observer.store(Arc::new(observer));
+    }
+
+    /// Return the currently-attached field observer, if any.
+    pub fn field_observer(&self) -> Option<Arc<FieldObserver>> {
+        self.field_observer.load_full().as_ref().clone()
     }
 
     /// Atomically replace the engine with a new one.
@@ -198,6 +221,15 @@ impl LogProcessor {
 
         if decoded_events.is_empty() {
             return empty_results(batch.len());
+        }
+
+        // Optional opt-in field observation. Cheap when disabled (one
+        // ArcSwap load + Option check); when enabled, walks each decoded
+        // event's field keys before evaluation.
+        if let Some(observer) = self.field_observer.load_full().as_ref().as_ref() {
+            for (_, decoded) in &decoded_events {
+                observer.observe(decoded);
+            }
         }
 
         // Phase 2: Batch evaluation — parallel detection + sequential correlation
