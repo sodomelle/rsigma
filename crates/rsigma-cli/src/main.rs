@@ -8,7 +8,7 @@ mod fix;
 use std::path::PathBuf;
 use std::process;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use commands::{
     ConditionArgs, ConvertArgs, EvalArgs, FieldsArgs, LintArgs, LintCounts, ListFormatsArgs,
     MigrateSourcesArgs, ParseArgs, ResolveArgs, StdinArgs, ValidateArgs,
@@ -202,7 +202,14 @@ enum PipelineCommands {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // Parse into `ArgMatches` (not just the typed `Cli`) so commands can ask
+    // clap which flags were set explicitly on the command line. That drives
+    // the config precedence (CLI flag > env > file > default).
+    let matches = Cli::command().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
 
     // Daemon installs its own JSON subscriber unconditionally; only init for
     // other subcommands when the user opts in via --log-format.
@@ -220,7 +227,7 @@ fn main() {
         init_cli_log_subscriber(format);
     }
 
-    dispatch(cli.command);
+    dispatch(cli.command, &matches);
 }
 
 /// Forward a deprecated flat invocation to its new home and print a stderr
@@ -233,10 +240,10 @@ fn deprecation_warn(old: &str, new: &str) {
     );
 }
 
-fn dispatch(command: Commands) {
+fn dispatch(command: Commands, matches: &ArgMatches) {
     match command {
         // -- Grouped commands ------------------------------------------------
-        Commands::Engine { cmd } => dispatch_engine(cmd),
+        Commands::Engine { cmd } => dispatch_engine(cmd, matches),
         Commands::Rule { cmd } => dispatch_rule(cmd),
         Commands::Backend { cmd } => dispatch_backend(cmd),
         Commands::Pipeline { cmd } => dispatch_pipeline(cmd),
@@ -250,7 +257,10 @@ fn dispatch(command: Commands) {
         #[cfg(feature = "daemon")]
         Commands::Daemon(args) => {
             deprecation_warn("daemon", "engine daemon");
-            cmd_daemon(args);
+            let dm = matches
+                .subcommand_matches("daemon")
+                .expect("daemon submatches present");
+            cmd_daemon(args, dm);
         }
         Commands::Parse(args) => {
             deprecation_warn("parse", "rule parse");
@@ -295,11 +305,18 @@ fn dispatch(command: Commands) {
     }
 }
 
-fn dispatch_engine(cmd: EngineCommands) {
+#[cfg_attr(not(feature = "daemon"), allow(unused_variables))]
+fn dispatch_engine(cmd: EngineCommands, matches: &ArgMatches) {
     match cmd {
         EngineCommands::Eval(args) => run_eval(args),
         #[cfg(feature = "daemon")]
-        EngineCommands::Daemon(args) => cmd_daemon(args),
+        EngineCommands::Daemon(args) => {
+            let dm = matches
+                .subcommand_matches("engine")
+                .and_then(|m| m.subcommand_matches("daemon"))
+                .expect("engine daemon submatches present");
+            cmd_daemon(args, dm);
+        }
     }
 }
 
@@ -646,6 +663,75 @@ fn json_to_val(v: serde_json::Value) -> Val {
                 .map(|(k, v)| (Val::from(k), json_to_val(v)))
                 .collect(),
         ),
+    }
+}
+
+/// Drift guard: clap's compiled daemon defaults must equal the single-source
+/// constants in `config::defaults`, since the resolver treats clap's
+/// `DefaultValue` as the lowest layer.
+#[cfg(all(test, feature = "daemon"))]
+mod config_default_drift {
+    use super::*;
+    use crate::config::defaults;
+
+    fn daemon_default(id: &str) -> Option<String> {
+        let cmd = Cli::command();
+        let engine = cmd.find_subcommand("engine")?;
+        let daemon = engine.find_subcommand("daemon")?;
+        daemon
+            .get_arguments()
+            .find(|a| a.get_id() == id)?
+            .get_default_values()
+            .first()
+            .map(|s| s.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn clap_daemon_defaults_match_config_defaults() {
+        assert_eq!(
+            daemon_default("api_addr").as_deref(),
+            Some(defaults::API_ADDR)
+        );
+        assert_eq!(
+            daemon_default("input_format").as_deref(),
+            Some(defaults::INPUT_FORMAT)
+        );
+        assert_eq!(
+            daemon_default("syslog_tz").as_deref(),
+            Some(defaults::SYSLOG_TZ)
+        );
+        assert_eq!(
+            daemon_default("correlation_event_mode").as_deref(),
+            Some(defaults::CORRELATION_EVENT_MODE)
+        );
+        assert_eq!(
+            daemon_default("timestamp_fallback").as_deref(),
+            Some(defaults::TIMESTAMP_FALLBACK)
+        );
+        assert_eq!(
+            daemon_default("buffer_size"),
+            Some(defaults::BUFFER_SIZE.to_string())
+        );
+        assert_eq!(
+            daemon_default("batch_size"),
+            Some(defaults::BATCH_SIZE.to_string())
+        );
+        assert_eq!(
+            daemon_default("drain_timeout"),
+            Some(defaults::DRAIN_TIMEOUT.to_string())
+        );
+        assert_eq!(
+            daemon_default("max_correlation_events"),
+            Some(defaults::MAX_CORRELATION_EVENTS.to_string())
+        );
+        assert_eq!(
+            daemon_default("state_save_interval"),
+            Some(defaults::STATE_SAVE_INTERVAL.to_string())
+        );
+        assert_eq!(
+            daemon_default("observe_fields_max_keys"),
+            Some(defaults::OBSERVE_FIELDS_MAX_KEYS.to_string())
+        );
     }
 }
 

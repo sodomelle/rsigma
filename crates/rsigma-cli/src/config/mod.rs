@@ -12,7 +12,7 @@
 //! `resolve` (added alongside the per-command wiring).
 
 pub(crate) mod commands;
-mod defaults;
+pub(crate) mod defaults;
 mod resolve;
 mod schema;
 
@@ -20,6 +20,50 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub(crate) use schema::{Merge, RsigmaConfigPartial};
+
+/// Load the config files and fold them with the compiled defaults and the
+/// `RSIGMA_*` environment layer into one typed partial (precedence:
+/// default < file < env). Unknown keys are warned about on stderr. Exits with
+/// `CONFIG_ERROR` if a discovered file cannot be read or parsed.
+///
+/// The CLI-flag layer is applied separately by each command, since only the
+/// command knows which of its flags were set explicitly.
+pub(crate) fn load_and_merge(explicit: Option<&Path>) -> RsigmaConfigPartial {
+    match load_layered(explicit) {
+        Ok(loaded) => {
+            for (path, key) in &loaded.unknown_keys {
+                eprintln!("warning: unknown config key '{key}' in {}", path.display());
+            }
+            for section in inactive_sections(&loaded.config) {
+                eprintln!(
+                    "warning: config section '{section}' is set but inert in this build (feature disabled)"
+                );
+            }
+            defaults::defaults_partial()
+                .merge(loaded.config)
+                .merge(resolve::env_partial())
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(crate::exit_code::CONFIG_ERROR);
+        }
+    }
+}
+
+/// Print the effective `section` config (defaults < file < env) as YAML to
+/// stdout, used by `--dry-run`. CLI flags override these at runtime; that note
+/// goes to stderr so the YAML on stdout stays clean.
+pub(crate) fn print_dry_run(section: &str, base: &RsigmaConfigPartial) {
+    let value = resolve::to_value(base);
+    let filtered = value
+        .get(section)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    eprintln!(
+        "# effective {section} config (defaults < file < env); CLI flags override these at runtime"
+    );
+    println!("{}", yaml_serde::to_string(&filtered).unwrap_or_default());
+}
 
 /// Errors surfaced while loading a config file.
 #[derive(Debug)]
