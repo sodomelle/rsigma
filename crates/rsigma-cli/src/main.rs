@@ -1,4 +1,5 @@
 mod commands;
+mod config;
 #[cfg(feature = "daemon")]
 mod daemon;
 pub(crate) mod exit_code;
@@ -88,6 +89,12 @@ enum Commands {
     Pipeline {
         #[command(subcommand)]
         cmd: PipelineCommands,
+    },
+
+    /// Manage rsigma configuration files (init, validate, schema, path)
+    Config {
+        #[command(subcommand)]
+        cmd: config::commands::ConfigCommands,
     },
 
     // ---- Deprecated flat aliases (hidden from `--help`, still functional) ----
@@ -233,6 +240,7 @@ fn dispatch(command: Commands) {
         Commands::Rule { cmd } => dispatch_rule(cmd),
         Commands::Backend { cmd } => dispatch_backend(cmd),
         Commands::Pipeline { cmd } => dispatch_pipeline(cmd),
+        Commands::Config { cmd } => config::commands::dispatch(cmd),
 
         // -- Deprecated flat aliases ----------------------------------------
         Commands::Eval(args) => {
