@@ -50,6 +50,16 @@ pub(crate) fn load_and_merge(explicit: Option<&Path>) -> RsigmaConfigPartial {
     }
 }
 
+/// Best-effort lookup of `global.log_format` from the discovered config files
+/// and `RSIGMA_*` env (no compiled default, so this is `None` unless an
+/// operator set it). Used by `main` to pick the CLI log format before any
+/// command runs. Quiet: unlike `load_and_merge`, it never warns or exits.
+pub(crate) fn discovered_log_format() -> Option<String> {
+    let loaded = load_layered(None).ok()?;
+    let merged = loaded.config.merge(resolve::env_partial());
+    merged.global.and_then(|g| g.log_format)
+}
+
 /// Print the effective `section` config (defaults < file < env) as YAML to
 /// stdout, used by `--dry-run`. CLI flags override these at runtime; that note
 /// goes to stderr so the YAML on stdout stays clean.

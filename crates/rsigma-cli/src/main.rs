@@ -223,11 +223,25 @@ fn main() {
     );
     #[cfg(not(feature = "daemon"))]
     let is_daemon = false;
-    if !is_daemon && let Some(format) = cli.log_format {
+    // The --log-format flag wins; otherwise honor global.log_format from a
+    // discovered config file or RSIGMA_GLOBAL__LOG_FORMAT.
+    let log_format = cli
+        .log_format
+        .or_else(|| config::discovered_log_format().and_then(|s| parse_log_format(&s)));
+    if !is_daemon && let Some(format) = log_format {
         init_cli_log_subscriber(format);
     }
 
     dispatch(cli.command, &matches);
+}
+
+/// Parse a `global.log_format` config string into a `LogFormat`.
+fn parse_log_format(s: &str) -> Option<LogFormat> {
+    match s {
+        "json" => Some(LogFormat::Json),
+        "text" => Some(LogFormat::Text),
+        _ => None,
+    }
 }
 
 /// Forward a deprecated flat invocation to its new home and print a stderr
@@ -252,7 +266,10 @@ fn dispatch(command: Commands, matches: &ArgMatches) {
         // -- Deprecated flat aliases ----------------------------------------
         Commands::Eval(args) => {
             deprecation_warn("eval", "engine eval");
-            run_eval(args);
+            let em = matches
+                .subcommand_matches("eval")
+                .expect("eval submatches present");
+            run_eval(args, em);
         }
         #[cfg(feature = "daemon")]
         Commands::Daemon(args) => {
@@ -305,10 +322,15 @@ fn dispatch(command: Commands, matches: &ArgMatches) {
     }
 }
 
-#[cfg_attr(not(feature = "daemon"), allow(unused_variables))]
 fn dispatch_engine(cmd: EngineCommands, matches: &ArgMatches) {
     match cmd {
-        EngineCommands::Eval(args) => run_eval(args),
+        EngineCommands::Eval(args) => {
+            let em = matches
+                .subcommand_matches("engine")
+                .and_then(|m| m.subcommand_matches("eval"))
+                .expect("engine eval submatches present");
+            run_eval(args, em);
+        }
         #[cfg(feature = "daemon")]
         EngineCommands::Daemon(args) => {
             let dm = matches
@@ -347,8 +369,10 @@ fn dispatch_pipeline(cmd: PipelineCommands) {
 }
 
 /// Shared eval entry point used by both `engine eval` and the deprecated
-/// `eval` alias. Centralizes the `--fail-on-detection` exit-code handling.
-fn run_eval(args: EvalArgs) {
+/// `eval` alias. Applies config (CLI flag > env > file > default) before
+/// reading `fail_on_detection`, then centralizes the exit-code handling.
+fn run_eval(mut args: EvalArgs, matches: &ArgMatches) {
+    commands::apply_eval_config(&mut args, matches);
     let fail_on_detection = args.fail_on_detection;
     let had_matches = commands::cmd_eval(args);
     if fail_on_detection && had_matches {
