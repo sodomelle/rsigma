@@ -5,6 +5,26 @@ Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma
 
 ## [Unreleased]
 
+### Array matching: `[any]`/`[all]` blocks, implicit any-member, and positional indexing (#159)
+
+rsigma can now match members of arrays in event data, an experimental extension proposed to the Sigma specification ([issue #158](https://github.com/timescale/rsigma/issues/158), [sigma-specification Discussion #106](https://github.com/SigmaHQ/sigma-specification/discussions/106)). Arrays are first-class in cloud and audit logs (CloudTrail, GCP, Okta, Azure Activity, Kubernetes audit, Windows Event Logs) and there was previously no portable way to match a member. The feature is documented in the new [Array Matching guide](docs/guide/array-matching.md) and ships marked experimental because the surface syntax is still under upstream review.
+
+**Three constructs, all expressed with `[...]` selectors on the field path.**
+
+- **Implicit any-member.** A plain field expression matches a scalar or any member of an array (`connections: '1.2.3.1'`), including through dotted paths into arrays of objects (`connections.ip|cidr: '123.1.0.0/16'`). This required fixing a first-match-wins bug in `JsonEvent::get_field`: a dotted path crossing an array now collects every element's leaf value, so any-member matching is correct rather than testing only the first element.
+- **Object-scope blocks** `field[any]:` and `field[all]:` open a nested detection evaluated against a single array member, for same-element correlation (one connection that is both `protocol: TCP` and in a suspicious CIDR). `[any]` requires at least one matching member; `[all]` requires a non-empty array where every member matches.
+- **Positional indexing** `field[N]` (zero-based) selects one element, for ordered arrays where each index carries meaning (`args[0]` is the process image, `args[1..]` are parameters). It is deterministic: a missing field, a non-array value, or an out-of-range index does not match. It composes with paths and quantifiers (`connections[0].ip`, `rules[any].ip[0]`).
+
+Array selectors are kept strictly distinct from the existing `all` value-list modifier.
+
+**New lint rule.** `flattened_array_correlation` (warning) flags two or more sibling keys that share a quantified array prefix (e.g. `connections[any].protocol` and `connections[any].ip`); they open independent scopes and do not correlate on the same element, so the rule points authors at the object-scope block form. The lint catalogue now lists 67 rules.
+
+**Conversion.** A new `Backend::convert_array_match` hook lowers the constructs where a backend can express them and errors with `UnsupportedArrayMatching` otherwise, never emitting a query with different semantics. The PostgreSQL/TimescaleDB backend lowers object-scope blocks to `EXISTS` / `NOT EXISTS` over `jsonb_array_elements` (guarded by `jsonb_typeof(...) = 'array'`) and positional indices to `->n` / `->>n`, in JSONB mode. LynxDB and other text backends report the construct as unsupported. Positional indexing is unexpressible in Elasticsearch query DSL because Lucene arrays are unordered sets, which is the strongest argument for evaluating the index in the engine.
+
+**AST and API.** `rsigma-parser` gains `ArrayQuantifier` and the `Detection::ArrayMatch` / `Detection::And` variants; `rsigma-eval` gains the matching `CompiledDetection` variants. The rule index, bloom filter, and cross-rule Aho-Corasick prefilters no longer prune array-valued fields.
+
+**Tests.** New parser, evaluator, and converter tests cover the flat-array, object-array fan-out, any/all correlation, scalar-member, nested-quantifier, mixed-map, and positional-index cases, plus PostgreSQL golden SQL and unsupported-backend errors.
+
 ### TTY-aware output + structured output formats (#157)
 
 Every rsigma subcommand can now emit its structured output in one of five formats, selected by a new **global** `--output-format <json|ndjson|table|csv|tsv>` flag. The default is TTY-aware: pretty JSON when stdout is a terminal, plain NDJSON when piped or redirected, so `rsigma engine eval … | jq` does the right thing without any extra flag and `rsigma engine eval` in a terminal is finally readable.
