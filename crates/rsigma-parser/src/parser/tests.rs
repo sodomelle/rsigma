@@ -1394,3 +1394,215 @@ fn deep_merge_succeeds_at_reasonable_depth() {
     let result = super::deep_merge(nested_map(10), nested_map(10));
     assert!(result.is_ok());
 }
+
+// =============================================================================
+// Array matching (object-scope quantifier blocks)
+// =============================================================================
+
+/// Parse a single-selection rule and return its `selection` detection.
+fn parse_selection(detection_body: &str) -> Detection {
+    let yaml = format!(
+        "title: T\nlogsource:\n    category: test\ndetection:\n{detection_body}    condition: selection\n"
+    );
+    let collection =
+        parse_sigma_yaml(&yaml).unwrap_or_else(|e| panic!("parse failed: {e}\n{yaml}"));
+    collection.rules[0].detection.named["selection"].clone()
+}
+
+#[test]
+fn array_object_scope_block_any() {
+    let det = parse_selection(
+        "    selection:\n        connections[any]:\n            protocol: \"TCP\"\n            ip|cidr: \"10.0.0.0/8\"\n",
+    );
+    let Detection::ArrayMatch {
+        field,
+        quantifier,
+        body,
+    } = det
+    else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    assert_eq!(field, "connections");
+    assert_eq!(quantifier, ArrayQuantifier::Any);
+    let Detection::AllOf(items) = *body else {
+        panic!("expected AllOf body");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].field.name.as_deref(), Some("protocol"));
+    assert_eq!(items[1].field.name.as_deref(), Some("ip"));
+    assert_eq!(items[1].field.modifiers, vec![Modifier::Cidr]);
+}
+
+#[test]
+fn array_object_scope_block_all() {
+    let det = parse_selection(
+        "    selection:\n        connections[all]:\n            protocol: \"TCP\"\n",
+    );
+    let Detection::ArrayMatch {
+        field, quantifier, ..
+    } = det
+    else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    assert_eq!(field, "connections");
+    assert_eq!(quantifier, ArrayQuantifier::All);
+}
+
+#[test]
+fn array_path_shorthand_desugars_to_block() {
+    let det = parse_selection("    selection:\n        connections[any].ip: \"1.2.3.1\"\n");
+    let Detection::ArrayMatch {
+        field,
+        quantifier,
+        body,
+    } = det
+    else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    assert_eq!(field, "connections");
+    assert_eq!(quantifier, ArrayQuantifier::Any);
+    let Detection::AllOf(items) = *body else {
+        panic!("expected AllOf body");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].field.name.as_deref(), Some("ip"));
+}
+
+#[test]
+fn array_scalar_member_match_uses_selfless_item() {
+    // `tags[all]: value` matches the array member itself; represented as a
+    // body item with no field name.
+    let det = parse_selection("    selection:\n        tags[all]: \"prod\"\n");
+    let Detection::ArrayMatch {
+        field,
+        quantifier,
+        body,
+    } = det
+    else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    assert_eq!(field, "tags");
+    assert_eq!(quantifier, ArrayQuantifier::All);
+    let Detection::AllOf(items) = *body else {
+        panic!("expected AllOf body");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].field.name, None);
+}
+
+#[test]
+fn array_scalar_member_match_keeps_modifier() {
+    let det = parse_selection("    selection:\n        ip[all]|startswith: \"123\"\n");
+    let Detection::ArrayMatch { body, .. } = det else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    let Detection::AllOf(items) = *body else {
+        panic!("expected AllOf body");
+    };
+    assert_eq!(items[0].field.name, None);
+    assert_eq!(items[0].field.modifiers, vec![Modifier::StartsWith]);
+}
+
+#[test]
+fn array_nested_quantifiers() {
+    let det =
+        parse_selection("    selection:\n        rules[any].ip[all]|startswith: \"123.1.1\"\n");
+    let Detection::ArrayMatch {
+        field,
+        quantifier,
+        body,
+    } = det
+    else {
+        panic!("expected outer ArrayMatch, got {det:?}");
+    };
+    assert_eq!(field, "rules");
+    assert_eq!(quantifier, ArrayQuantifier::Any);
+    let Detection::ArrayMatch {
+        field: inner_field,
+        quantifier: inner_q,
+        body: inner_body,
+    } = *body
+    else {
+        panic!("expected inner ArrayMatch");
+    };
+    assert_eq!(inner_field, "ip");
+    assert_eq!(inner_q, ArrayQuantifier::All);
+    let Detection::AllOf(items) = *inner_body else {
+        panic!("expected AllOf");
+    };
+    assert_eq!(items[0].field.name, None);
+    assert_eq!(items[0].field.modifiers, vec![Modifier::StartsWith]);
+}
+
+#[test]
+fn array_mixed_map_produces_and() {
+    let det = parse_selection(
+        "    selection:\n        EventName: \"AuthorizeSecurityGroupIngress\"\n        connections[any]:\n            protocol: \"TCP\"\n",
+    );
+    let Detection::And(parts) = det else {
+        panic!("expected And, got {det:?}");
+    };
+    assert_eq!(parts.len(), 2);
+    assert!(matches!(parts[0], Detection::AllOf(_)));
+    assert!(matches!(parts[1], Detection::ArrayMatch { .. }));
+}
+
+#[test]
+fn array_flattened_correlation_parses_as_independent_scopes() {
+    // The declined shared-prefix form parses as two independent ArrayMatch
+    // scopes (NOT same-element correlation). The linter warns about this; the
+    // parser does not bind the two keys together.
+    let det = parse_selection(
+        "    selection:\n        connections[any].protocol: \"TCP\"\n        connections[any].ip: \"1.2.3.1\"\n",
+    );
+    let Detection::And(parts) = det else {
+        panic!("expected And, got {det:?}");
+    };
+    assert_eq!(parts.len(), 2);
+    assert!(
+        parts
+            .iter()
+            .all(|p| matches!(p, Detection::ArrayMatch { .. }))
+    );
+}
+
+#[test]
+fn array_unknown_quantifier_is_error() {
+    let yaml = "title: T\nlogsource:\n    category: test\ndetection:\n    selection:\n        connections[one]: \"x\"\n    condition: selection\n";
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    assert!(collection.rules.is_empty());
+    assert!(
+        collection
+            .errors
+            .iter()
+            .any(|e| e.contains("array quantifier")),
+        "got: {:?}",
+        collection.errors
+    );
+}
+
+#[test]
+fn array_positional_index_is_rejected() {
+    let yaml = "title: T\nlogsource:\n    category: test\ndetection:\n    selection:\n        connections[0]: \"x\"\n    condition: selection\n";
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    assert!(collection.rules.is_empty());
+    assert!(
+        collection
+            .errors
+            .iter()
+            .any(|e| e.contains("array quantifier")),
+        "got: {:?}",
+        collection.errors
+    );
+}
+
+#[test]
+fn plain_dotted_field_is_unchanged() {
+    // No quantifier: behavior must be identical to before (a plain AllOf item
+    // with the full dotted name).
+    let det = parse_selection("    selection:\n        process.command_line: \"x\"\n");
+    let Detection::AllOf(items) = det else {
+        panic!("expected AllOf, got {det:?}");
+    };
+    assert_eq!(items[0].field.name.as_deref(), Some("process.command_line"));
+}

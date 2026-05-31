@@ -173,12 +173,34 @@ pub(super) fn parse_detections(value: &Value) -> Result<Detections> {
 fn parse_detection(value: &Value) -> Result<Detection> {
     match value {
         Value::Mapping(m) => {
-            // Case 1: key-value mapping → AND-linked detection items
-            let items: Vec<DetectionItem> = m
-                .iter()
-                .map(|(k, v)| parse_detection_item(k.as_str().unwrap_or(""), v))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(Detection::AllOf(items))
+            // Case 1: key-value mapping → AND-linked detection items.
+            //
+            // Keys without an array quantifier (`[any]`/`[all]`) become plain
+            // detection items exactly as before. Keys carrying a quantifier
+            // desugar into `Detection::ArrayMatch` object-scope blocks. A map
+            // with no blocks stays an `AllOf`; a single block becomes that
+            // block; a mix becomes an `And`.
+            let mut items: Vec<DetectionItem> = Vec::new();
+            let mut blocks: Vec<Detection> = Vec::new();
+            for (k, v) in m.iter() {
+                match parse_map_entry(k.as_str().unwrap_or(""), v)? {
+                    ParsedEntry::Item(item) => items.push(item),
+                    ParsedEntry::Block(block) => blocks.push(block),
+                }
+            }
+
+            if blocks.is_empty() {
+                Ok(Detection::AllOf(items))
+            } else if items.is_empty() && blocks.len() == 1 {
+                Ok(blocks.into_iter().next().expect("len checked"))
+            } else {
+                let mut parts: Vec<Detection> = Vec::new();
+                if !items.is_empty() {
+                    parts.push(Detection::AllOf(items));
+                }
+                parts.extend(blocks);
+                Ok(Detection::And(parts))
+            }
         }
         Value::Sequence(seq) => {
             // Check if all items are plain values (strings/numbers/etc.)
@@ -218,6 +240,196 @@ fn parse_detection_item(key: &str, value: &Value) -> Result<DetectionItem> {
     };
 
     Ok(DetectionItem { field, values })
+}
+
+// =============================================================================
+// Array matching: object-scope quantifier blocks
+// =============================================================================
+//
+// Proposed Sigma array-matching extension (sigma-specification Discussion #106).
+// A detection key whose field path carries an array quantifier (`[any]`/`[all]`)
+// desugars into a `Detection::ArrayMatch`:
+//
+//   connections[any]:            ArrayMatch { field: "connections", quantifier: Any,
+//     protocol: "TCP"      ==>       body: AllOf([protocol == "TCP", ip cidr ...]) }
+//     ip|cidr: "10.0.0.0/8"
+//
+//   connections[any].ip: "x" ==> ArrayMatch { field: "connections", quantifier: Any,
+//                                              body: AllOf([ip == "x"]) }
+//
+// Keys with no quantifier are untouched and parse exactly as before.
+
+/// A parsed field-path segment: a name plus an optional array quantifier.
+struct PathSegment {
+    name: String,
+    quantifier: Option<ArrayQuantifier>,
+}
+
+/// The result of parsing one mapping entry: either a plain detection item or an
+/// array object-scope block.
+enum ParsedEntry {
+    Item(DetectionItem),
+    Block(Detection),
+}
+
+/// Parse one `key: value` mapping entry, desugaring array quantifiers.
+fn parse_map_entry(key: &str, value: &Value) -> Result<ParsedEntry> {
+    // Split the field path from the trailing modifier chain (`field|mod1|mod2`).
+    let (field_part, modifier_part) = match key.split_once('|') {
+        Some((f, m)) => (f, Some(m)),
+        None => (key, None),
+    };
+
+    // Empty field part (keyword-style key or bare modifiers): defer to the
+    // existing field-spec parser, which already handles these cases.
+    if field_part.is_empty() {
+        return Ok(ParsedEntry::Item(parse_detection_item(key, value)?));
+    }
+
+    let segments = parse_field_path(field_part)?;
+    match segments.iter().position(|s| s.quantifier.is_some()) {
+        // No array quantifier anywhere: a plain detection item, unchanged.
+        None => Ok(ParsedEntry::Item(parse_detection_item(key, value)?)),
+        Some(idx) => {
+            let quantifier = segments[idx]
+                .quantifier
+                .expect("position found a quantifier");
+            // The array lives at the path up to and including the quantified
+            // segment.
+            let array_field = segments[..=idx]
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let body = build_block_body(&segments[idx + 1..], modifier_part, value)?;
+            Ok(ParsedEntry::Block(Detection::ArrayMatch {
+                field: array_field,
+                quantifier,
+                body: Box::new(body),
+            }))
+        }
+    }
+}
+
+/// Build the nested detection that an array block evaluates per member.
+fn build_block_body(
+    remaining: &[PathSegment],
+    modifier_part: Option<&str>,
+    value: &Value,
+) -> Result<Detection> {
+    if remaining.is_empty() {
+        // The quantifier was on the final path segment.
+        match value {
+            // `field[any]: { sub-map }` → object-scope block over member fields.
+            Value::Mapping(_) => {
+                if modifier_part.is_some() {
+                    return Err(SigmaParserError::InvalidFieldSpec(
+                        "value modifiers cannot be applied to an array object-scope block; \
+                         move the modifier onto a field inside the block"
+                            .into(),
+                    ));
+                }
+                parse_detection(value)
+            }
+            // `field[all]: value` (or a list) → match the array member itself.
+            // Represented as a body item with no field name.
+            _ => {
+                let modifiers = parse_modifiers(modifier_part)?;
+                let field = FieldSpec::new(None, modifiers);
+                let values = match value {
+                    Value::Sequence(seq) => seq.iter().map(|v| to_sigma_value(v, &field)).collect(),
+                    _ => vec![to_sigma_value(value, &field)],
+                };
+                Ok(Detection::AllOf(vec![DetectionItem { field, values }]))
+            }
+        }
+    } else {
+        // A quantifier in the middle of the path: recurse on the remainder so
+        // further quantifiers and the leaf predicate desugar correctly.
+        let remaining_key = reconstruct_key(remaining, modifier_part);
+        match parse_map_entry(&remaining_key, value)? {
+            ParsedEntry::Item(item) => Ok(Detection::AllOf(vec![item])),
+            ParsedEntry::Block(block) => Ok(block),
+        }
+    }
+}
+
+/// Split a field path into dot-separated segments, recognizing the array
+/// quantifiers `[any]` and `[all]` on the tail of a segment.
+///
+/// Only a well-formed `name[any]` / `name[all]` is treated as a quantifier.
+/// An unknown bracket token (e.g. `[0]`, positional indexing, which is out of
+/// scope for this extension) is a parse error so typos surface instead of
+/// silently matching a literal field name with brackets.
+fn parse_field_path(field_part: &str) -> Result<Vec<PathSegment>> {
+    let mut segments = Vec::new();
+    for raw in field_part.split('.') {
+        if raw.ends_with(']')
+            && let Some(open) = raw.find('[')
+        {
+            let name = &raw[..open];
+            let token = &raw[open + 1..raw.len() - 1];
+            let quantifier = match token {
+                "any" => ArrayQuantifier::Any,
+                "all" => ArrayQuantifier::All,
+                other => {
+                    return Err(SigmaParserError::InvalidFieldSpec(format!(
+                        "unknown array quantifier '[{other}]' in field '{field_part}'; \
+                         only [any] and [all] are supported (positional indexing is not)"
+                    )));
+                }
+            };
+            if name.is_empty() {
+                return Err(SigmaParserError::InvalidFieldSpec(format!(
+                    "array quantifier without a field name in '{field_part}'"
+                )));
+            }
+            segments.push(PathSegment {
+                name: name.to_string(),
+                quantifier: Some(quantifier),
+            });
+        } else {
+            segments.push(PathSegment {
+                name: raw.to_string(),
+                quantifier: None,
+            });
+        }
+    }
+    Ok(segments)
+}
+
+/// Parse the pipe-separated modifier chain that follows the first `|` in a key.
+fn parse_modifiers(modifier_part: Option<&str>) -> Result<Vec<Modifier>> {
+    let mut modifiers = Vec::new();
+    if let Some(part) = modifier_part {
+        for mod_str in part.split('|') {
+            if mod_str == "not" {
+                return Err(SigmaParserError::NotIsNotAModifier);
+            }
+            let m = mod_str
+                .parse::<Modifier>()
+                .map_err(|_| SigmaParserError::UnknownModifier(mod_str.to_string()))?;
+            modifiers.push(m);
+        }
+    }
+    Ok(modifiers)
+}
+
+/// Rebuild a detection key string from path segments plus an optional modifier
+/// chain, re-appending `[any]`/`[all]` markers.
+fn reconstruct_key(segments: &[PathSegment], modifier_part: Option<&str>) -> String {
+    let path = segments
+        .iter()
+        .map(|s| match s.quantifier {
+            Some(q) => format!("{}[{q}]", s.name),
+            None => s.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    match modifier_part {
+        Some(m) => format!("{path}|{m}"),
+        None => path,
+    }
 }
 
 /// Convert a YAML value to a SigmaValue, respecting field modifiers.

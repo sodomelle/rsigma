@@ -48,6 +48,12 @@ pub enum EvalError {
     /// A cycle was detected in correlation rule references.
     #[error("correlation cycle detected: {0}")]
     CorrelationCycle(String),
+
+    /// An array object-scope match (`field[any]` / `field[all]`) was
+    /// encountered. The parser produces these, but evaluator support is added
+    /// in a later phase of the array-matching feature.
+    #[error("array matching not yet supported by the evaluator: {0}")]
+    ArrayMatchUnsupported(String),
 }
 
 /// Convenience result type.

@@ -366,6 +366,11 @@ pub fn compile_detection(detection: &Detection) -> Result<CompiledDetection> {
             let compiled: Result<Vec<_>> = dets.iter().map(compile_detection).collect();
             Ok(CompiledDetection::AnyOf(compiled?))
         }
+        Detection::ArrayMatch { .. } | Detection::And(_) => Err(EvalError::ArrayMatchUnsupported(
+            "array object-scope blocks (field[any]/field[all]) parse but evaluator support \
+             lands in a later phase of the array-matching feature"
+                .into(),
+        )),
         Detection::Keywords(values) => {
             let ci = true; // keywords are case-insensitive by default
             let matchers: Vec<CompiledMatcher> = values
