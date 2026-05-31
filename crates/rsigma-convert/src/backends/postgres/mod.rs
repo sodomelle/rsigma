@@ -33,6 +33,22 @@ fn validate_sql_identifier(s: &str) -> Result<()> {
     }
 }
 
+/// Return a fresh, query-unique sequence number for naming array-element
+/// aliases (`__sigma_e0`, `__sigma_e1`, ...). Stored in the conversion state so
+/// nested object-scope blocks never collide.
+fn next_array_alias_seq(state: &mut ConversionState) -> u64 {
+    let cur = state
+        .processing_state
+        .get("_array_alias_seq")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    state.processing_state.insert(
+        "_array_alias_seq".to_string(),
+        serde_json::Value::from(cur + 1),
+    );
+    cur
+}
+
 // =============================================================================
 // PostgreSQL TextQueryConfig
 // =============================================================================
@@ -331,6 +347,108 @@ impl PostgresBackend {
         let plain = value.as_plain().unwrap_or_else(|| value.original.clone());
         format!("'{}'", self.escape_sql_str(&plain))
     }
+
+    // --- Array object-scope matching (JSONB) ---
+
+    /// Build a JSONB navigation expression `base->'a'->'b'...`. When `as_text`
+    /// the final hop uses `->>` (text); otherwise every hop uses `->` (jsonb),
+    /// which is what `jsonb_array_elements` needs.
+    fn jsonb_nav(base: &str, field: &str, as_text: bool) -> Result<String> {
+        let parts: Vec<&str> = field.split('.').collect();
+        let last = parts.len() - 1;
+        let mut expr = base.to_string();
+        for (i, part) in parts.iter().enumerate() {
+            validate_sql_identifier(part)?;
+            let escaped = part.replace('\'', "''");
+            if i == last && as_text {
+                expr.push_str(&format!("->>'{escaped}'"));
+            } else {
+                expr.push_str(&format!("->'{escaped}'"));
+            }
+        }
+        Ok(expr)
+    }
+
+    /// Clone this backend with a different JSONB base column. Used to convert an
+    /// array object-scope body relative to the per-element alias.
+    fn with_json_field(&self, json_field: Option<String>) -> Self {
+        PostgresBackend {
+            config: self.config,
+            table: self.table.clone(),
+            timestamp_field: self.timestamp_field.clone(),
+            json_field,
+            case_sensitive_re: self.case_sensitive_re,
+            schema: self.schema.clone(),
+            database: self.database.clone(),
+            timescaledb: self.timescaledb,
+        }
+    }
+
+    /// If `body` matches the array member value itself (every item is
+    /// field-less), return those items so the element can be bound as a scalar
+    /// text column via `jsonb_array_elements_text`.
+    fn scalar_self_body(body: &Detection) -> Option<&[DetectionItem]> {
+        if let Detection::AllOf(items) = body
+            && !items.is_empty()
+            && items.iter().all(|it| it.field.name.is_none())
+        {
+            return Some(items);
+        }
+        None
+    }
+
+    /// Lower an array object-scope match given the JSONB expression for the
+    /// array. `EXISTS` for `any`; non-empty `NOT EXISTS(... NOT ...)` for `all`.
+    fn array_exists_from_expr(
+        &self,
+        array_expr: &str,
+        quantifier: ArrayQuantifier,
+        body: &Detection,
+        state: &mut ConversionState,
+    ) -> Result<String> {
+        let seq = next_array_alias_seq(state);
+        let alias = format!("__sigma_e{seq}");
+
+        let (srf, body_sql) = if let Some(items) = Self::scalar_self_body(body) {
+            // Scalar members: bind each element as a text column and reuse the
+            // normal item conversion by renaming the field-less items to the
+            // alias (a plain, unquoted identifier in non-JSONB mode).
+            let renamed = Detection::AllOf(
+                items
+                    .iter()
+                    .map(|it| DetectionItem {
+                        field: FieldSpec::new(Some(alias.clone()), it.field.modifiers.clone()),
+                        values: it.values.clone(),
+                    })
+                    .collect(),
+            );
+            let elem = self.with_json_field(None);
+            (
+                "jsonb_array_elements_text",
+                default_convert_detection(&elem, &renamed, state)?,
+            )
+        } else {
+            // Object members: bind each element as a JSONB column and convert
+            // the body relative to it (nested blocks recurse via the trait).
+            let elem = self.with_json_field(Some(alias.clone()));
+            (
+                "jsonb_array_elements",
+                default_convert_detection(&elem, body, state)?,
+            )
+        };
+
+        Ok(match quantifier {
+            ArrayQuantifier::Any => format!(
+                "(jsonb_typeof({array_expr}) = 'array' AND EXISTS \
+                 (SELECT 1 FROM {srf}({array_expr}) AS {alias} WHERE {body_sql}))"
+            ),
+            ArrayQuantifier::All => format!(
+                "(jsonb_typeof({array_expr}) = 'array' AND jsonb_array_length({array_expr}) > 0 \
+                 AND NOT EXISTS \
+                 (SELECT 1 FROM {srf}({array_expr}) AS {alias} WHERE NOT ({body_sql})))"
+            ),
+        })
+    }
 }
 
 impl Default for PostgresBackend {
@@ -424,6 +542,23 @@ impl Backend for PostgresBackend {
         state: &mut ConversionState,
     ) -> Result<String> {
         default_convert_detection_item(self, item, state)
+    }
+
+    fn convert_array_match(
+        &self,
+        field: &str,
+        quantifier: ArrayQuantifier,
+        body: &Detection,
+        state: &mut ConversionState,
+    ) -> Result<String> {
+        // Array matching requires JSONB-backed event storage; in flat-column
+        // mode there is no array to unnest.
+        let json_col = self
+            .json_field
+            .as_deref()
+            .ok_or(ConvertError::UnsupportedArrayMatching)?;
+        let array_expr = Self::jsonb_nav(json_col, field, false)?;
+        self.array_exists_from_expr(&array_expr, quantifier, body, state)
     }
 
     // --- Field/value escaping ---

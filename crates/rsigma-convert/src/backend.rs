@@ -92,6 +92,24 @@ pub trait Backend: Send + Sync {
         state: &mut ConversionState,
     ) -> Result<String>;
 
+    /// Convert an array object-scope match (`field[any]:` / `field[all]:`).
+    ///
+    /// `body` is evaluated against the members of the array at `field`. The
+    /// default implementation reports the construct as unsupported; backends
+    /// that can express member quantification (e.g. PostgreSQL JSONB via
+    /// `jsonb_array_elements` + `EXISTS`) override this. Backends must fail
+    /// loudly here rather than emit a query with different semantics.
+    fn convert_array_match(
+        &self,
+        field: &str,
+        quantifier: ArrayQuantifier,
+        body: &Detection,
+        state: &mut ConversionState,
+    ) -> Result<String> {
+        let _ = (field, quantifier, body, state);
+        Err(ConvertError::UnsupportedArrayMatching)
+    }
+
     // --- Field/value escaping ---
 
     fn escape_and_quote_field(&self, field: &str) -> String;

@@ -302,12 +302,22 @@ pub fn default_convert_detection(
                 .collect::<Result<Vec<_>>>()?;
             backend.convert_condition_or(&parts)
         }
-        // Array object-scope matching does not lower to every backend. Fail
-        // loudly here rather than emit a query with different semantics; a
-        // future per-backend lowering (e.g. PostgreSQL `jsonb_array_elements`
-        // + EXISTS) will override this for backends that can express it.
-        rsigma_parser::Detection::ArrayMatch { .. } | rsigma_parser::Detection::And(_) => {
-            Err(ConvertError::UnsupportedArrayMatching)
+        // Array object-scope matching: dispatch to the backend hook (which
+        // fails loudly by default and is overridden by backends that can
+        // express member quantification, e.g. PostgreSQL JSONB).
+        rsigma_parser::Detection::ArrayMatch {
+            field,
+            quantifier,
+            body,
+        } => backend.convert_array_match(field, *quantifier, body, state),
+        // AND of heterogeneous sub-detections (a mapping mixing plain items
+        // with array object-scope blocks).
+        rsigma_parser::Detection::And(dets) => {
+            let parts: Vec<String> = dets
+                .iter()
+                .map(|d| backend.convert_detection(d, state))
+                .collect::<Result<Vec<_>>>()?;
+            backend.convert_condition_and(&parts)
         }
     }
 }

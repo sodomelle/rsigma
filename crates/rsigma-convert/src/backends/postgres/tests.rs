@@ -2049,3 +2049,162 @@ fn legitimate_dotted_json_path_three_levels() {
     let result = backend.field_expr("a.b.c").unwrap();
     assert_eq!(result, "data->'a'->'b'->>'c'");
 }
+
+// =============================================================================
+// Array object-scope matching (JSONB)
+// =============================================================================
+
+fn convert_json(yaml: &str) -> Vec<String> {
+    let mut backend = PostgresBackend::new();
+    backend.json_field = Some("data".to_string());
+    convert_with(yaml, &backend)
+}
+
+#[test]
+fn array_any_object_scope_emits_exists() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[any]:
+            protocol: 'TCP'
+            ip|cidr: '123.1.0.0/16'
+    condition: selection
+"#,
+    );
+    assert_eq!(
+        queries,
+        vec![
+            "SELECT * FROM security_events WHERE \
+             (jsonb_typeof(data->'connections') = 'array' AND EXISTS \
+             (SELECT 1 FROM jsonb_array_elements(data->'connections') AS __sigma_e0 \
+             WHERE __sigma_e0->>'protocol' = 'TCP' AND \
+             (__sigma_e0->>'ip')::inet <<= '123.1.0.0/16'::cidr))"
+        ]
+    );
+}
+
+#[test]
+fn array_all_object_scope_emits_not_exists_with_nonempty_guard() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[all]:
+            protocol: 'TCP'
+    condition: selection
+"#,
+    );
+    let q = &queries[0];
+    assert!(
+        q.contains("jsonb_array_length(data->'connections') > 0"),
+        "{q}"
+    );
+    assert!(
+        q.contains(
+            "NOT EXISTS (SELECT 1 FROM jsonb_array_elements(data->'connections') AS __sigma_e0 \
+             WHERE NOT (__sigma_e0->>'protocol' = 'TCP'))"
+        ),
+        "{q}"
+    );
+}
+
+#[test]
+fn array_scalar_member_uses_elements_text() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        tags[all]|startswith: '123.'
+    condition: selection
+"#,
+    );
+    let q = &queries[0];
+    assert!(
+        q.contains("jsonb_array_elements_text(data->'tags') AS __sigma_e0"),
+        "{q}"
+    );
+    assert!(q.contains("__sigma_e0 ILIKE '123.%'"), "{q}");
+    assert!(q.contains("NOT EXISTS"), "{q}");
+}
+
+#[test]
+fn array_nested_quantifiers_use_distinct_aliases() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        rules[any]:
+            type: 'allow'
+            ip[all]|startswith: '123.1.1'
+    condition: selection
+"#,
+    );
+    let q = &queries[0];
+    // Outer array over rules.
+    assert!(
+        q.contains("jsonb_array_elements(data->'rules') AS __sigma_e0"),
+        "{q}"
+    );
+    assert!(q.contains("__sigma_e0->>'type' = 'allow'"), "{q}");
+    // Inner array over each rule's ip, with a distinct alias.
+    assert!(
+        q.contains("jsonb_array_elements_text(__sigma_e0->'ip') AS __sigma_e1"),
+        "{q}"
+    );
+    assert!(q.contains("__sigma_e1 ILIKE '123.1.1%'"), "{q}");
+}
+
+#[test]
+fn array_mixed_map_emits_and() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        eventName: 'AuthorizeSecurityGroupIngress'
+        ipPermissions[any]:
+            ipRanges: '0.0.0.0/0'
+    condition: selection
+"#,
+    );
+    let q = &queries[0];
+    assert!(
+        q.contains("data->>'eventName' = 'AuthorizeSecurityGroupIngress'"),
+        "{q}"
+    );
+    assert!(
+        q.contains("EXISTS (SELECT 1 FROM jsonb_array_elements(data->'ipPermissions')"),
+        "{q}"
+    );
+    assert!(q.contains(" AND "), "{q}");
+}
+
+#[test]
+fn array_unsupported_without_jsonb_mode() {
+    // Flat-column mode has no JSONB array to unnest.
+    let backend = PostgresBackend::new();
+    let collection = parse_sigma_yaml(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[any]:
+            protocol: 'TCP'
+    condition: selection
+"#,
+    )
+    .unwrap();
+    let err = backend.convert_rule(&collection.rules[0], "default", &PipelineState::default());
+    assert!(matches!(err, Err(ConvertError::UnsupportedArrayMatching)));
+}
