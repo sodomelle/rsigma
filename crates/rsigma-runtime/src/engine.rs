@@ -458,8 +458,15 @@ mod tests {
     // The pipeline-embedded `sources:` dedup set is process-wide, so tests
     // that read it need to serialize. cargo test runs tests in a binary
     // concurrently; this guard turns those into sequential probes of the
-    // shared set.
+    // shared set. `serial_guard` recovers a poisoned lock so a failing test
+    // does not cascade into the others.
     static DEDUP_TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+        DEDUP_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     const RULE_YAML: &str = r#"
 title: TestRule
@@ -502,7 +509,7 @@ transformations:
 
     #[test]
     fn load_rules_surfaces_inline_sources_deprecation_through_runtime() {
-        let _guard = DEDUP_TEST_GUARD.lock().unwrap();
+        let _guard = serial_guard();
         reset_inline_sources_dedup_for_tests();
 
         let dir = tempfile::tempdir().unwrap();
@@ -533,7 +540,7 @@ transformations:
 
     #[test]
     fn load_rules_does_not_warn_when_pipeline_has_no_inline_sources() {
-        let _guard = DEDUP_TEST_GUARD.lock().unwrap();
+        let _guard = serial_guard();
         reset_inline_sources_dedup_for_tests();
 
         let dir = tempfile::tempdir().unwrap();
@@ -562,7 +569,7 @@ transformations:
 
     #[test]
     fn hot_reload_dedups_inline_sources_warning_for_same_pipeline_path() {
-        let _guard = DEDUP_TEST_GUARD.lock().unwrap();
+        let _guard = serial_guard();
         reset_inline_sources_dedup_for_tests();
 
         let dir = tempfile::tempdir().unwrap();
