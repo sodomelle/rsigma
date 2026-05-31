@@ -108,15 +108,19 @@ impl RuleIndex {
         let mut seen = vec![false; self.rule_count];
         let mut result = Vec::new();
 
+        let mut keys: Vec<String> = Vec::new();
         for (field_name, value_map) in &self.field_index {
-            if let Some(event_value) = event.get_field(field_name)
-                && let Some(search_key) = value_to_lowercase_string(&event_value)
-                && let Some(rule_indices) = value_map.get(&search_key)
-            {
-                for &idx in rule_indices {
-                    if !seen[idx] {
-                        seen[idx] = true;
-                        result.push(idx);
+            if let Some(event_value) = event.get_field(field_name) {
+                keys.clear();
+                collect_lowercase_keys(&event_value, &mut keys);
+                for key in &keys {
+                    if let Some(rule_indices) = value_map.get(key) {
+                        for &idx in rule_indices {
+                            if !seen[idx] {
+                                seen[idx] = true;
+                                result.push(idx);
+                            }
+                        }
                     }
                 }
             }
@@ -165,6 +169,15 @@ fn extract_exact_pairs(detection: &CompiledDetection) -> Vec<(String, String)> {
                 pairs.extend(extract_exact_pairs(sub));
             }
         }
+        CompiledDetection::And(subs) => {
+            for sub in subs {
+                pairs.extend(extract_exact_pairs(sub));
+            }
+        }
+        // Array object-scope predicates are on member sub-fields, not
+        // top-level fields, so they yield no top-level exact pairs. A rule
+        // with only array matching falls back to the always-evaluated set.
+        CompiledDetection::ArrayMatch { .. } => {}
         CompiledDetection::Keywords(_) => {}
     }
     pairs
@@ -202,16 +215,24 @@ fn extract_from_matcher(matcher: &CompiledMatcher, field: &str, out: &mut Vec<(S
     }
 }
 
-/// Convert an [`EventValue`] to a lowercase string for index lookup.
+/// Collect lowercase index-lookup keys from an [`EventValue`].
 ///
-/// Returns `None` for null, objects, and arrays (not meaningful for exact match).
-fn value_to_lowercase_string(value: &EventValue) -> Option<String> {
+/// Scalars contribute one key. Arrays contribute one key per (scalar) member
+/// so that an array-valued event field still selects rules keyed on any of its
+/// members (otherwise array fields would be silently pruned from candidates).
+/// Objects and nulls contribute nothing.
+fn collect_lowercase_keys(value: &EventValue, out: &mut Vec<String>) {
     match value {
-        EventValue::Str(s) => Some(s.to_lowercase()),
-        EventValue::Int(n) => Some(n.to_string()),
-        EventValue::Float(f) => Some(f.to_string()),
-        EventValue::Bool(b) => Some(b.to_string()),
-        _ => None,
+        EventValue::Str(s) => out.push(s.to_lowercase()),
+        EventValue::Int(n) => out.push(n.to_string()),
+        EventValue::Float(f) => out.push(f.to_string()),
+        EventValue::Bool(b) => out.push(b.to_string()),
+        EventValue::Array(arr) => {
+            for v in arr {
+                collect_lowercase_keys(v, out);
+            }
+        }
+        _ => {}
     }
 }
 

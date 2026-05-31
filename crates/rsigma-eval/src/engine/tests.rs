@@ -1412,3 +1412,220 @@ detection:
         }
     }
 }
+
+// =============================================================================
+// Array matching (object-scope quantifier blocks + implicit any-member)
+// =============================================================================
+
+/// Whether a rule matches an event value.
+fn matches(engine: &Engine, ev: &serde_json::Value) -> bool {
+    !engine.evaluate(&JsonEvent::borrow(ev)).is_empty()
+}
+
+#[test]
+fn array_implicit_any_flat_scalar_array() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections: '123.1.1.1'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"connections": ["123.1.2.2", "123.1.1.1", "123.3.3.3"]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"connections": ["10.0.0.1", "10.0.0.2"]})
+    ));
+}
+
+#[test]
+fn array_implicit_any_through_object_array_fans_out() {
+    // Regression for the first-match-wins traversal bug: the matching element
+    // is NOT first, so this only passes with full fan-out.
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections.ip: '123.1.1.1'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"connections": [{"ip": "10.0.0.1"}, {"ip": "123.1.1.1"}]})
+    ));
+}
+
+#[test]
+fn array_object_scope_any_correlates_same_element() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[any]:
+            protocol: 'TCP'
+            ip|cidr: '123.1.0.0/16'
+    condition: selection
+"#,
+    );
+    // One element is both TCP and in-CIDR -> match.
+    assert!(matches(
+        &engine,
+        &json!({"connections": [
+            {"protocol": "UDP", "ip": "123.1.5.5"},
+            {"protocol": "TCP", "ip": "123.1.9.9"}
+        ]})
+    ));
+    // TCP and in-CIDR exist, but on DIFFERENT elements -> no match
+    // (this is the property the flattened form cannot express).
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [
+            {"protocol": "TCP", "ip": "10.0.0.1"},
+            {"protocol": "UDP", "ip": "123.1.9.9"}
+        ]})
+    ));
+}
+
+#[test]
+fn array_object_scope_all_requires_every_member_and_nonempty() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[all]:
+            protocol: 'TCP'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"connections": [{"protocol": "TCP"}, {"protocol": "TCP"}]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [{"protocol": "TCP"}, {"protocol": "UDP"}]})
+    ));
+    // Empty / missing array must not match `all`.
+    assert!(!matches(&engine, &json!({"connections": []})));
+    assert!(!matches(&engine, &json!({"other": 1})));
+}
+
+#[test]
+fn array_scalar_member_all_with_modifier() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        ips[all]|startswith: '123.'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"ips": ["123.1.1.1", "123.9.9.9"]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"ips": ["123.1.1.1", "10.0.0.1"]})
+    ));
+}
+
+#[test]
+fn array_nested_quantifiers() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        rules[any]:
+            type: 'allow'
+            ip[all]|startswith: '123.1.1'
+    condition: selection
+"#,
+    );
+    // There is an allow rule whose ip array members all start with 123.1.1.
+    assert!(matches(
+        &engine,
+        &json!({"rules": [
+            {"type": "block", "ip": ["124.0.0.1"]},
+            {"type": "allow", "ip": ["123.1.1.2", "123.1.1.3"]}
+        ]})
+    ));
+    // The allow rule has a non-conforming ip -> no match.
+    assert!(!matches(
+        &engine,
+        &json!({"rules": [
+            {"type": "allow", "ip": ["123.1.1.2", "10.0.0.1"]}
+        ]})
+    ));
+}
+
+#[test]
+fn array_mixed_map_and_semantics() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        eventName: 'AuthorizeSecurityGroupIngress'
+        ipPermissions[any]:
+            ipRanges|contains: '0.0.0.0/0'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({
+            "eventName": "AuthorizeSecurityGroupIngress",
+            "ipPermissions": [{"ipRanges": "0.0.0.0/0"}]
+        })
+    ));
+    // Array matches but the sibling scalar does not -> AND fails.
+    assert!(!matches(
+        &engine,
+        &json!({
+            "eventName": "RunInstances",
+            "ipPermissions": [{"ipRanges": "0.0.0.0/0"}]
+        })
+    ));
+}
+
+#[test]
+fn array_okta_scopes_cloud_shape() {
+    let engine = make_engine_with_rule(
+        r#"
+title: Okta high-priv scope grant
+logsource: { product: okta, service: system }
+detection:
+    selection:
+        target[any]:
+            type: 'PUBLIC_CLIENT_APP'
+            scopes|contains: 'okta.users.manage'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"target": [
+            {"type": "USER", "scopes": "okta.users.read"},
+            {"type": "PUBLIC_CLIENT_APP", "scopes": "okta.users.manage okta.apps.read"}
+        ]})
+    ));
+}

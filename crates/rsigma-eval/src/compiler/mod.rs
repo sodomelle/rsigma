@@ -27,12 +27,12 @@ use regex::Regex;
 
 use rsigma_parser::value::{SpecialChar, StringPart};
 use rsigma_parser::{
-    ConditionExpr, Detection, DetectionItem, Level, LogSource, Modifier, Quantifier,
-    SelectorPattern, SigmaRule, SigmaString, SigmaValue,
+    ArrayQuantifier, ConditionExpr, Detection, DetectionItem, Level, LogSource, Modifier,
+    Quantifier, SelectorPattern, SigmaRule, SigmaString, SigmaValue,
 };
 
 use crate::error::{EvalError, Result};
-use crate::event::Event;
+use crate::event::{Event, EventValue};
 use crate::matcher::{CompiledMatcher, sigma_string_to_regex};
 use crate::result::{DetectionBody, EvaluationResult, FieldMatch, ResultBody, RuleHeader};
 
@@ -77,6 +77,17 @@ pub enum CompiledDetection {
     AnyOf(Vec<CompiledDetection>),
     /// Keyword detection: match values across all event fields.
     Keywords(CompiledMatcher),
+    /// Array object-scope match: evaluate `body` against the members of the
+    /// array at `field`, with `any`/`all` quantification. Within `body`, a
+    /// detection item with `field == None` matches the array member itself.
+    ArrayMatch {
+        field: String,
+        quantifier: ArrayQuantifier,
+        body: Box<CompiledDetection>,
+    },
+    /// AND of heterogeneous sub-detections (a mapping mixing plain items with
+    /// array object-scope blocks).
+    And(Vec<CompiledDetection>),
 }
 
 /// A compiled detection item: a field + matcher.
@@ -366,11 +377,27 @@ pub fn compile_detection(detection: &Detection) -> Result<CompiledDetection> {
             let compiled: Result<Vec<_>> = dets.iter().map(compile_detection).collect();
             Ok(CompiledDetection::AnyOf(compiled?))
         }
-        Detection::ArrayMatch { .. } | Detection::And(_) => Err(EvalError::ArrayMatchUnsupported(
-            "array object-scope blocks (field[any]/field[all]) parse but evaluator support \
-             lands in a later phase of the array-matching feature"
-                .into(),
-        )),
+        Detection::ArrayMatch {
+            field,
+            quantifier,
+            body,
+        } => {
+            let compiled_body = compile_detection(body)?;
+            Ok(CompiledDetection::ArrayMatch {
+                field: field.clone(),
+                quantifier: *quantifier,
+                body: Box::new(compiled_body),
+            })
+        }
+        Detection::And(dets) => {
+            if dets.is_empty() {
+                return Err(EvalError::InvalidModifiers(
+                    "And detection must not be empty".into(),
+                ));
+            }
+            let compiled: Result<Vec<_>> = dets.iter().map(compile_detection).collect();
+            Ok(CompiledDetection::And(compiled?))
+        }
         Detection::Keywords(values) => {
             let ci = true; // keywords are case-insensitive by default
             let matchers: Vec<CompiledMatcher> = values
@@ -869,6 +896,121 @@ where
             .iter()
             .any(|d| eval_detection_with_bloom(d, event, bloom)),
         CompiledDetection::Keywords(matcher) => matcher.matches_keyword(event),
+        CompiledDetection::ArrayMatch {
+            field,
+            quantifier,
+            body,
+        } => match event.get_field(field) {
+            Some(value) => eval_array_quantified(&value, *quantifier, body, event),
+            None => false,
+        },
+        CompiledDetection::And(dets) => dets
+            .iter()
+            .all(|d| eval_detection_with_bloom(d, event, bloom)),
+    }
+}
+
+/// Evaluate an array object-scope match against a resolved field value.
+///
+/// A scalar (non-array, non-null) value is treated as a single-member array,
+/// so `any`/`all` both reduce to "the value satisfies the body". `all`
+/// requires a non-empty array; a missing/null value never matches.
+fn eval_array_quantified<E: Event>(
+    value: &EventValue,
+    quantifier: ArrayQuantifier,
+    body: &CompiledDetection,
+    outer: &E,
+) -> bool {
+    match value {
+        EventValue::Array(members) => match quantifier {
+            ArrayQuantifier::Any => members.iter().any(|m| eval_array_body(body, m, outer)),
+            ArrayQuantifier::All => {
+                !members.is_empty() && members.iter().all(|m| eval_array_body(body, m, outer))
+            }
+        },
+        EventValue::Null => false,
+        single => eval_array_body(body, single, outer),
+    }
+}
+
+/// Evaluate a compiled detection `body` against a single array member.
+///
+/// Field references inside `body` resolve relative to the member; a body item
+/// with no field name matches the member value itself.
+fn eval_array_body<E: Event>(body: &CompiledDetection, member: &EventValue, outer: &E) -> bool {
+    match body {
+        CompiledDetection::AllOf(items) => items
+            .iter()
+            .all(|item| eval_array_item(item, member, outer)),
+        CompiledDetection::AnyOf(dets) => dets.iter().any(|d| eval_array_body(d, member, outer)),
+        CompiledDetection::And(dets) => dets.iter().all(|d| eval_array_body(d, member, outer)),
+        CompiledDetection::ArrayMatch {
+            field,
+            quantifier,
+            body: inner,
+        } => match element_field(member, field) {
+            Some(value) => eval_array_quantified(value, *quantifier, inner, outer),
+            None => false,
+        },
+        // Keywords inside an element scope match the member value directly.
+        CompiledDetection::Keywords(matcher) => matcher.matches(member, outer),
+    }
+}
+
+/// Evaluate one body item against an array member.
+fn eval_array_item<E: Event>(item: &CompiledDetectionItem, member: &EventValue, outer: &E) -> bool {
+    if let Some(expect_exists) = item.exists {
+        let exists = match &item.field {
+            Some(name) => element_field(member, name).is_some_and(|v| !v.is_null()),
+            None => !member.is_null(),
+        };
+        return exists == expect_exists;
+    }
+
+    match &item.field {
+        Some(name) => match element_field(member, name) {
+            Some(value) => item.matcher.matches(value, outer),
+            None => matches!(item.matcher, CompiledMatcher::Null),
+        },
+        // No field name: match the array member value itself.
+        None => item.matcher.matches(member, outer),
+    }
+}
+
+/// Resolve a field path within an array member (an [`EventValue`]).
+///
+/// Mirrors `JsonEvent::get_field`: a flat key first, then dot-separated
+/// traversal, distributing over arrays encountered along the path.
+fn element_field<'a>(member: &'a EventValue<'a>, path: &str) -> Option<&'a EventValue<'a>> {
+    if let EventValue::Map(entries) = member
+        && let Some((_, v)) = entries.iter().find(|(k, _)| k.as_ref() == path)
+    {
+        return Some(v);
+    }
+    if path.contains('.') {
+        let parts: Vec<&str> = path.split('.').collect();
+        return traverse_event_value(member, &parts);
+    }
+    None
+}
+
+fn traverse_event_value<'a>(
+    current: &'a EventValue<'a>,
+    parts: &[&str],
+) -> Option<&'a EventValue<'a>> {
+    let Some((head, rest)) = parts.split_first() else {
+        return Some(current);
+    };
+    match current {
+        EventValue::Map(entries) => {
+            let next = entries
+                .iter()
+                .find(|(k, _)| k.as_ref() == *head)
+                .map(|(_, v)| v)?;
+            traverse_event_value(next, rest)
+        }
+        EventValue::Array(members) => members.iter().find_map(|m| traverse_event_value(m, parts)),
+        _ => None,
     }
 }
 
@@ -944,6 +1086,24 @@ fn collect_detection_fields(
             }
         }
         CompiledDetection::AnyOf(dets) => {
+            for d in dets {
+                if eval_detection_with_bloom(d, event, &crate::engine::bloom_index::NoBloom) {
+                    collect_detection_fields(d, event, out);
+                }
+            }
+        }
+        CompiledDetection::ArrayMatch { field, .. } => {
+            // Report the array container field and its value (the member
+            // fields are relative to elements and not meaningful as top-level
+            // field paths).
+            if let Some(value) = event.get_field(field) {
+                out.push(FieldMatch {
+                    field: field.clone(),
+                    value: value.to_json(),
+                });
+            }
+        }
+        CompiledDetection::And(dets) => {
             for d in dets {
                 if eval_detection_with_bloom(d, event, &crate::engine::bloom_index::NoBloom) {
                     collect_detection_fields(d, event, out);

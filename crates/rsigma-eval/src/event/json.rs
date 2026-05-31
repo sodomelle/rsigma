@@ -51,8 +51,11 @@ impl<'a> Event for JsonEvent<'a> {
     /// Get a field value by name, supporting dot-notation for nested access.
     ///
     /// Checks for a flat key first (exact match), then falls back to
-    /// dot-separated traversal. When a path segment yields an array,
-    /// each element is tried and the first match is returned (OR semantics).
+    /// dot-separated traversal. When a path segment crosses an array, every
+    /// element is followed and all terminal values are collected: a single
+    /// hit is returned as-is, multiple hits are returned as an
+    /// [`EventValue::Array`] so the matcher applies any-member semantics
+    /// (rather than only testing the first element).
     fn get_field(&self, path: &str) -> Option<EventValue<'_>> {
         let value: &Value = &self.inner;
 
@@ -64,7 +67,13 @@ impl<'a> Event for JsonEvent<'a> {
 
         if path.contains('.') {
             let parts: Vec<&str> = path.split('.').collect();
-            return traverse_json(value, &parts).map(EventValue::from);
+            let mut collected: Vec<EventValue<'_>> = Vec::new();
+            collect_json_path(value, &parts, &mut collected);
+            return match collected.len() {
+                0 => None,
+                1 => collected.pop(),
+                _ => Some(EventValue::Array(collected)),
+            };
         }
 
         None
@@ -110,31 +119,31 @@ impl<'a> Event for JsonEvent<'a> {
     }
 }
 
-/// Recursively traverse a JSON value following dot-notation path segments.
+/// Recursively follow dot-notation path segments, collecting every terminal
+/// value into `out`.
 ///
-/// When a segment resolves to an array, each element is tried and the first
-/// match for the remaining path is returned.
-fn traverse_json<'a>(current: &'a Value, parts: &[&str]) -> Option<&'a Value> {
-    if parts.is_empty() {
-        return Some(current);
-    }
-
-    let (head, rest) = (parts[0], &parts[1..]);
+/// When a segment resolves to an array, the remaining path is applied to every
+/// element (not just the first), so a path crossing an array of objects yields
+/// one value per element. This gives correct any-member semantics once the
+/// collected values are wrapped in an [`EventValue::Array`].
+fn collect_json_path<'a>(current: &'a Value, parts: &[&str], out: &mut Vec<EventValue<'a>>) {
+    let Some((head, rest)) = parts.split_first() else {
+        out.push(EventValue::from(current));
+        return;
+    };
 
     match current {
         Value::Object(map) => {
-            let next = map.get(head)?;
-            traverse_json(next, rest)
+            if let Some(next) = map.get(*head) {
+                collect_json_path(next, rest, out);
+            }
         }
         Value::Array(arr) => {
             for item in arr {
-                if let Some(v) = traverse_json(item, parts) {
-                    return Some(v);
-                }
+                collect_json_path(item, parts, out);
             }
-            None
         }
-        _ => None,
+        _ => {}
     }
 }
 
@@ -250,11 +259,16 @@ mod tests {
 
     #[test]
     fn json_array_traversal() {
+        // A path crossing an array of objects now collects every element's
+        // leaf value (any-member semantics), not just the first.
         let v = json!({"a": {"b": [{"c": "found"}, {"c": "other"}]}});
         let event = JsonEvent::borrow(&v);
         assert_eq!(
             event.get_field("a.b.c"),
-            Some(EventValue::Str(Cow::Borrowed("found")))
+            Some(EventValue::Array(vec![
+                EventValue::Str(Cow::Borrowed("found")),
+                EventValue::Str(Cow::Borrowed("other")),
+            ]))
         );
     }
 
@@ -274,9 +288,14 @@ mod tests {
             ]
         });
         let event = JsonEvent::borrow(&v);
+        // Nested arrays flatten to every leaf value.
         assert_eq!(
             event.get_field("events.actors.name"),
-            Some(EventValue::Str(Cow::Borrowed("alice")))
+            Some(EventValue::Array(vec![
+                EventValue::Str(Cow::Borrowed("alice")),
+                EventValue::Str(Cow::Borrowed("bob")),
+                EventValue::Str(Cow::Borrowed("charlie")),
+            ]))
         );
     }
 
@@ -286,7 +305,10 @@ mod tests {
         let event = JsonEvent::borrow(&v);
         assert_eq!(
             event.get_field("process.command_line"),
-            Some(EventValue::Str(Cow::Borrowed("whoami")))
+            Some(EventValue::Array(vec![
+                EventValue::Str(Cow::Borrowed("whoami")),
+                EventValue::Str(Cow::Borrowed("id")),
+            ]))
         );
     }
 
