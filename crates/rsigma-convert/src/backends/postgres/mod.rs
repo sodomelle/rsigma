@@ -33,6 +33,12 @@ fn validate_sql_identifier(s: &str) -> Result<()> {
     }
 }
 
+/// A JSONB field-path navigation op: an object key or a positional index.
+enum FieldOp {
+    Key(String),
+    Index(u32),
+}
+
 /// Return a fresh, query-unique sequence number for naming array-element
 /// aliases (`__sigma_e0`, `__sigma_e1`, ...). Stored in the conversion state so
 /// nested object-scope blocks never collide.
@@ -264,26 +270,9 @@ impl PostgresBackend {
 
     fn field_expr(&self, field: &str) -> Result<String> {
         match &self.json_field {
-            Some(json_col) if field.contains('.') => {
-                let parts: Vec<&str> = field.split('.').collect();
-                let last = parts.len() - 1;
-                let mut expr = json_col.clone();
-                for (i, part) in parts.iter().enumerate() {
-                    validate_sql_identifier(part)?;
-                    let escaped = part.replace('\'', "''");
-                    if i == last {
-                        expr.push_str(&format!("->>'{escaped}'"));
-                    } else {
-                        expr.push_str(&format!("->'{escaped}'"));
-                    }
-                }
-                Ok(expr)
-            }
-            Some(json_col) => {
-                validate_sql_identifier(field)?;
-                let escaped = field.replace('\'', "''");
-                Ok(format!("{json_col}->>'{escaped}'"))
-            }
+            // JSONB navigation, with text extraction (`->>`) on the final hop.
+            // Supports dotted paths and positional `[N]` indices.
+            Some(json_col) => Self::jsonb_path(json_col, field, true),
             None => Ok(text_escape_and_quote_field(self.config, field)),
         }
     }
@@ -350,23 +339,72 @@ impl PostgresBackend {
 
     // --- Array object-scope matching (JSONB) ---
 
-    /// Build a JSONB navigation expression `base->'a'->'b'...`. When `as_text`
-    /// the final hop uses `->>` (text); otherwise every hop uses `->` (jsonb),
+    /// Build a JSONB navigation expression `base->'a'->0->'b'...`, supporting
+    /// dotted object keys and positional `[N]` indices. When `as_text` the
+    /// final hop uses `->>` (text); otherwise every hop uses `->` (jsonb),
     /// which is what `jsonb_array_elements` needs.
-    fn jsonb_nav(base: &str, field: &str, as_text: bool) -> Result<String> {
-        let parts: Vec<&str> = field.split('.').collect();
-        let last = parts.len() - 1;
+    fn jsonb_path(base: &str, field: &str, as_text: bool) -> Result<String> {
+        let ops = Self::parse_field_ops(field)?;
+        let last = ops.len() - 1;
         let mut expr = base.to_string();
-        for (i, part) in parts.iter().enumerate() {
-            validate_sql_identifier(part)?;
-            let escaped = part.replace('\'', "''");
-            if i == last && as_text {
-                expr.push_str(&format!("->>'{escaped}'"));
-            } else {
-                expr.push_str(&format!("->'{escaped}'"));
+        for (i, op) in ops.iter().enumerate() {
+            let text = as_text && i == last;
+            match op {
+                FieldOp::Key(k) => {
+                    let escaped = k.replace('\'', "''");
+                    if text {
+                        expr.push_str(&format!("->>'{escaped}'"));
+                    } else {
+                        expr.push_str(&format!("->'{escaped}'"));
+                    }
+                }
+                FieldOp::Index(n) => {
+                    if text {
+                        expr.push_str(&format!("->>{n}"));
+                    } else {
+                        expr.push_str(&format!("->{n}"));
+                    }
+                }
             }
         }
         Ok(expr)
+    }
+
+    /// Parse a JSONB field path into object-key and positional-index ops,
+    /// validating each key as a SQL identifier.
+    fn parse_field_ops(field: &str) -> Result<Vec<FieldOp>> {
+        let mut ops = Vec::new();
+        for part in field.split('.') {
+            let bpos = part.find('[');
+            let name = match bpos {
+                Some(p) => &part[..p],
+                None => part,
+            };
+            if !name.is_empty() {
+                validate_sql_identifier(name)?;
+                ops.push(FieldOp::Key(name.to_string()));
+            }
+            if let Some(p) = bpos {
+                let mut rem = &part[p..];
+                while !rem.is_empty() {
+                    let rest = rem
+                        .strip_prefix('[')
+                        .ok_or_else(|| ConvertError::InvalidIdentifier(part.to_string()))?;
+                    let close = rest
+                        .find(']')
+                        .ok_or_else(|| ConvertError::InvalidIdentifier(part.to_string()))?;
+                    let n: u32 = rest[..close]
+                        .parse()
+                        .map_err(|_| ConvertError::InvalidIdentifier(part.to_string()))?;
+                    ops.push(FieldOp::Index(n));
+                    rem = &rest[close + 1..];
+                }
+            }
+        }
+        if ops.is_empty() {
+            return Err(ConvertError::InvalidIdentifier(field.to_string()));
+        }
+        Ok(ops)
     }
 
     /// Clone this backend with a different JSONB base column. Used to convert an
@@ -557,7 +595,7 @@ impl Backend for PostgresBackend {
             .json_field
             .as_deref()
             .ok_or(ConvertError::UnsupportedArrayMatching)?;
-        let array_expr = Self::jsonb_nav(json_col, field, false)?;
+        let array_expr = Self::jsonb_path(json_col, field, false)?;
         self.array_exists_from_expr(&array_expr, quantifier, body, state)
     }
 

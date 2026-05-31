@@ -2190,6 +2190,45 @@ detection:
 }
 
 #[test]
+fn array_positional_index_scalar_sql() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        args[0]|endswith: '.exe'
+        args[1]: '-enc'
+    condition: selection
+"#,
+    );
+    let q = &queries[0];
+    assert!(q.contains("data->'args'->>0 ILIKE '%.exe'"), "{q}");
+    assert!(q.contains("data->'args'->>1 = '-enc'"), "{q}");
+}
+
+#[test]
+fn array_positional_index_dotted_sql() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[0].ip|cidr: '10.0.0.0/8'
+    condition: selection
+"#,
+    );
+    assert_eq!(
+        queries,
+        vec![
+            "SELECT * FROM security_events WHERE \
+             (data->'connections'->0->>'ip')::inet <<= '10.0.0.0/8'::cidr"
+        ]
+    );
+}
+
+#[test]
 fn array_unsupported_without_jsonb_mode() {
     // Flat-column mode has no JSONB array to unnest.
     let backend = PostgresBackend::new();

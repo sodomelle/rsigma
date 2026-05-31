@@ -980,37 +980,79 @@ fn eval_array_item<E: Event>(item: &CompiledDetectionItem, member: &EventValue, 
 /// Resolve a field path within an array member (an [`EventValue`]).
 ///
 /// Mirrors `JsonEvent::get_field`: a flat key first, then dot-separated
-/// traversal, distributing over arrays encountered along the path.
+/// traversal that distributes over arrays for object keys and selects a single
+/// element for positional `[N]` indices.
 fn element_field<'a>(member: &'a EventValue<'a>, path: &str) -> Option<&'a EventValue<'a>> {
     if let EventValue::Map(entries) = member
         && let Some((_, v)) = entries.iter().find(|(k, _)| k.as_ref() == path)
     {
         return Some(v);
     }
-    if path.contains('.') {
-        let parts: Vec<&str> = path.split('.').collect();
-        return traverse_event_value(member, &parts);
-    }
-    None
+    let ops = parse_event_ops(path);
+    nav_event_value(member, &ops)
 }
 
-fn traverse_event_value<'a>(
+enum EventOp<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+/// Parse a dot path into navigation ops, recognizing positional `name[N]`.
+fn parse_event_ops(path: &str) -> Vec<EventOp<'_>> {
+    let mut ops = Vec::new();
+    for part in path.split('.') {
+        match part.find('[') {
+            Some(bpos) if index_groups(&part[bpos..]).is_some() => {
+                let name = &part[..bpos];
+                if !name.is_empty() {
+                    ops.push(EventOp::Key(name));
+                }
+                for idx in index_groups(&part[bpos..]).expect("checked") {
+                    ops.push(EventOp::Index(idx));
+                }
+            }
+            _ => ops.push(EventOp::Key(part)),
+        }
+    }
+    ops
+}
+
+/// Parse `[N]` or `[N][M]...` into indices, or `None` if malformed/non-numeric.
+fn index_groups(s: &str) -> Option<Vec<usize>> {
+    let mut out = Vec::new();
+    let mut rem = s;
+    while !rem.is_empty() {
+        let rest = rem.strip_prefix('[')?;
+        let close = rest.find(']')?;
+        out.push(rest[..close].parse().ok()?);
+        rem = &rest[close + 1..];
+    }
+    Some(out)
+}
+
+fn nav_event_value<'a>(
     current: &'a EventValue<'a>,
-    parts: &[&str],
+    ops: &[EventOp<'_>],
 ) -> Option<&'a EventValue<'a>> {
-    let Some((head, rest)) = parts.split_first() else {
+    let Some((op, rest)) = ops.split_first() else {
         return Some(current);
     };
-    match current {
-        EventValue::Map(entries) => {
-            let next = entries
-                .iter()
-                .find(|(k, _)| k.as_ref() == *head)
-                .map(|(_, v)| v)?;
-            traverse_event_value(next, rest)
-        }
-        EventValue::Array(members) => members.iter().find_map(|m| traverse_event_value(m, parts)),
-        _ => None,
+    match op {
+        EventOp::Key(key) => match current {
+            EventValue::Map(entries) => {
+                let next = entries
+                    .iter()
+                    .find(|(k, _)| k.as_ref() == *key)
+                    .map(|(_, v)| v)?;
+                nav_event_value(next, rest)
+            }
+            EventValue::Array(members) => members.iter().find_map(|m| nav_event_value(m, ops)),
+            _ => None,
+        },
+        EventOp::Index(i) => match current {
+            EventValue::Array(members) => nav_event_value(members.get(*i)?, rest),
+            _ => None,
+        },
     }
 }
 

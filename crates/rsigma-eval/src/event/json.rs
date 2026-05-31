@@ -65,10 +65,10 @@ impl<'a> Event for JsonEvent<'a> {
             return Some(EventValue::from(v));
         }
 
-        if path.contains('.') {
-            let parts: Vec<&str> = path.split('.').collect();
+        if path.contains('.') || path.contains('[') {
+            let ops = parse_path_ops(path);
             let mut collected: Vec<EventValue<'_>> = Vec::new();
-            collect_json_path(value, &parts, &mut collected);
+            collect_by_ops(value, &ops, &mut collected);
             return match collected.len() {
                 0 => None,
                 1 => collected.pop(),
@@ -119,31 +119,84 @@ impl<'a> Event for JsonEvent<'a> {
     }
 }
 
-/// Recursively follow dot-notation path segments, collecting every terminal
-/// value into `out`.
+/// A single field-path navigation step.
+enum PathOp<'a> {
+    /// Object key lookup. Distributes over arrays (implicit any-member).
+    Key(&'a str),
+    /// Positional array index. Selects one element; never fans out.
+    Index(usize),
+}
+
+/// Parse a dot path into navigation ops, recognizing positional `name[N]`
+/// (and chained `name[N][M]`). A bracket group that is not a non-negative
+/// integer degrades to a literal object key so it simply fails to match.
+fn parse_path_ops(path: &str) -> Vec<PathOp<'_>> {
+    let mut ops = Vec::new();
+    for part in path.split('.') {
+        match part.find('[') {
+            Some(bpos) if parse_index_groups(&part[bpos..]).is_some() => {
+                let name = &part[..bpos];
+                if !name.is_empty() {
+                    ops.push(PathOp::Key(name));
+                }
+                for idx in parse_index_groups(&part[bpos..]).expect("checked") {
+                    ops.push(PathOp::Index(idx));
+                }
+            }
+            _ => ops.push(PathOp::Key(part)),
+        }
+    }
+    ops
+}
+
+/// Parse `[N]` or `[N][M]...` into the contained indices, or `None` if any
+/// group is malformed or non-numeric.
+fn parse_index_groups(s: &str) -> Option<Vec<usize>> {
+    let mut out = Vec::new();
+    let mut rem = s;
+    while !rem.is_empty() {
+        let rest = rem.strip_prefix('[')?;
+        let close = rest.find(']')?;
+        let idx: usize = rest[..close].parse().ok()?;
+        out.push(idx);
+        rem = &rest[close + 1..];
+    }
+    Some(out)
+}
+
+/// Follow navigation ops, collecting every terminal value into `out`.
 ///
-/// When a segment resolves to an array, the remaining path is applied to every
-/// element (not just the first), so a path crossing an array of objects yields
-/// one value per element. This gives correct any-member semantics once the
-/// collected values are wrapped in an [`EventValue::Array`].
-fn collect_json_path<'a>(current: &'a Value, parts: &[&str], out: &mut Vec<EventValue<'a>>) {
-    let Some((head, rest)) = parts.split_first() else {
+/// A `Key` op distributes over arrays (implicit any-member): the remaining ops
+/// are applied to every element, so a path crossing an array of objects yields
+/// one value per element. An `Index` op selects a single element and never
+/// fans out, giving deterministic positional access.
+fn collect_by_ops<'a>(current: &'a Value, ops: &[PathOp<'_>], out: &mut Vec<EventValue<'a>>) {
+    let Some((op, rest)) = ops.split_first() else {
         out.push(EventValue::from(current));
         return;
     };
 
-    match current {
-        Value::Object(map) => {
-            if let Some(next) = map.get(*head) {
-                collect_json_path(next, rest, out);
+    match op {
+        PathOp::Key(key) => match current {
+            Value::Object(map) => {
+                if let Some(next) = map.get(*key) {
+                    collect_by_ops(next, rest, out);
+                }
+            }
+            Value::Array(arr) => {
+                for item in arr {
+                    collect_by_ops(item, ops, out);
+                }
+            }
+            _ => {}
+        },
+        PathOp::Index(i) => {
+            if let Value::Array(arr) = current
+                && let Some(next) = arr.get(*i)
+            {
+                collect_by_ops(next, rest, out);
             }
         }
-        Value::Array(arr) => {
-            for item in arr {
-                collect_json_path(item, parts, out);
-            }
-        }
-        _ => {}
     }
 }
 

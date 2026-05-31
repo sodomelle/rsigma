@@ -1629,3 +1629,98 @@ detection:
         ]})
     ));
 }
+
+#[test]
+fn array_positional_index_scalar() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        args[0]|endswith: '\powershell.exe'
+        args[1]: '-enc'
+    condition: selection
+"#,
+    );
+    // Positional disambiguation: image at [0], first parameter at [1].
+    assert!(matches(
+        &engine,
+        &json!({"args": ["C:\\Windows\\System32\\powershell.exe", "-enc", "ZQ=="]})
+    ));
+    // '-enc' present but NOT at index 1 -> no match (index is exact, not any).
+    assert!(!matches(
+        &engine,
+        &json!({"args": ["C:\\Windows\\System32\\powershell.exe", "-noprofile", "-enc"]})
+    ));
+}
+
+#[test]
+fn array_positional_index_does_not_fan_out() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        ips[0]: '10.0.0.1'
+    condition: selection
+"#,
+    );
+    assert!(matches(&engine, &json!({"ips": ["10.0.0.1", "8.8.8.8"]})));
+    // 10.0.0.1 present but at index 1, not 0 -> no match.
+    assert!(!matches(&engine, &json!({"ips": ["8.8.8.8", "10.0.0.1"]})));
+    // Out of range / non-array -> no match.
+    assert!(!matches(&engine, &json!({"ips": []})));
+    assert!(!matches(&engine, &json!({"ips": "10.0.0.1"})));
+}
+
+#[test]
+fn array_positional_index_dotted_path() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[0].ip|cidr: '10.0.0.0/8'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"connections": [{"ip": "10.1.2.3"}, {"ip": "192.168.1.1"}]})
+    ));
+    // The in-CIDR ip is at index 1, not 0 -> no match.
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [{"ip": "192.168.1.1"}, {"ip": "10.1.2.3"}]})
+    ));
+}
+
+#[test]
+fn array_index_inside_quantifier() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        rules[any].ip[0]: '10.0.0.1'
+    condition: selection
+"#,
+    );
+    // Some rule whose FIRST ip is 10.0.0.1.
+    assert!(matches(
+        &engine,
+        &json!({"rules": [
+            {"ip": ["8.8.8.8"]},
+            {"ip": ["10.0.0.1", "1.1.1.1"]}
+        ]})
+    ));
+    // 10.0.0.1 appears, but never at index 0 -> no match.
+    assert!(!matches(
+        &engine,
+        &json!({"rules": [{"ip": ["8.8.8.8", "10.0.0.1"]}]})
+    ));
+}

@@ -1575,22 +1575,74 @@ fn array_unknown_quantifier_is_error() {
         collection
             .errors
             .iter()
-            .any(|e| e.contains("array quantifier")),
+            .any(|e| e.contains("unknown array selector")),
         "got: {:?}",
         collection.errors
     );
 }
 
 #[test]
-fn array_positional_index_is_rejected() {
-    let yaml = "title: T\nlogsource:\n    category: test\ndetection:\n    selection:\n        connections[0]: \"x\"\n    condition: selection\n";
+fn array_positional_index_scalar_is_plain_field() {
+    // `args[0]: x` is a plain item whose field path keeps the index marker.
+    let det = parse_selection("    selection:\n        args[0]: \"cmd.exe\"\n");
+    let Detection::AllOf(items) = det else {
+        panic!("expected AllOf, got {det:?}");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].field.name.as_deref(), Some("args[0]"));
+}
+
+#[test]
+fn array_positional_index_with_modifier_and_dotted_path() {
+    let det = parse_selection("    selection:\n        connections[0].ip|cidr: \"10.0.0.0/8\"\n");
+    let Detection::AllOf(items) = det else {
+        panic!("expected AllOf, got {det:?}");
+    };
+    assert_eq!(items[0].field.name.as_deref(), Some("connections[0].ip"));
+    assert_eq!(items[0].field.modifiers, vec![Modifier::Cidr]);
+}
+
+#[test]
+fn array_positional_index_block_expands_under_prefix() {
+    // `connections[0]:` with a map ANDs the items under the indexed path.
+    let det = parse_selection(
+        "    selection:\n        connections[0]:\n            protocol: \"TCP\"\n            ip: \"10.0.0.1\"\n",
+    );
+    let Detection::AllOf(items) = det else {
+        panic!("expected AllOf, got {det:?}");
+    };
+    let names: Vec<Option<&str>> = items.iter().map(|i| i.field.name.as_deref()).collect();
+    assert!(
+        names.contains(&Some("connections[0].protocol")),
+        "{names:?}"
+    );
+    assert!(names.contains(&Some("connections[0].ip")), "{names:?}");
+}
+
+#[test]
+fn array_index_inside_quantifier_block() {
+    // `rules[any].ip[0]` -> ArrayMatch over rules, body item field "ip[0]".
+    let det = parse_selection("    selection:\n        rules[any].ip[0]: \"10.0.0.1\"\n");
+    let Detection::ArrayMatch { field, body, .. } = det else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    assert_eq!(field, "rules");
+    let Detection::AllOf(items) = *body else {
+        panic!("expected AllOf body");
+    };
+    assert_eq!(items[0].field.name.as_deref(), Some("ip[0]"));
+}
+
+#[test]
+fn array_unknown_selector_is_error() {
+    let yaml = "title: T\nlogsource:\n    category: test\ndetection:\n    selection:\n        connections[oops]: \"x\"\n    condition: selection\n";
     let collection = parse_sigma_yaml(yaml).unwrap();
     assert!(collection.rules.is_empty());
     assert!(
         collection
             .errors
             .iter()
-            .any(|e| e.contains("array quantifier")),
+            .any(|e| e.contains("unknown array selector")),
         "got: {:?}",
         collection.errors
     );
