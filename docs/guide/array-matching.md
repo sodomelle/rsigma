@@ -122,11 +122,11 @@ rsigma's evaluator (`rsigma engine eval` / `engine daemon`) implements all three
 
 | Construct | Evaluator | PostgreSQL / TimescaleDB (JSONB) | Other backends |
 |-----------|-----------|----------------------------------|----------------|
-| Implicit any-member | Yes | Yes (`->>` path access) | Backend-dependent |
+| Implicit any-member | Yes | Yes (`->>` path access) | Backend-dependent (native on Splunk/KQL multivalue fields) |
 | `[any]` / `[all]` block | Yes | Yes (`jsonb_array_elements` + `EXISTS` / `NOT EXISTS`, JSONB mode) | Unsupported (`UnsupportedArrayMatching`) |
-| Positional `[N]` | Yes | Yes (`->n` / `->>n`, JSONB mode) | Backend-dependent |
+| Positional `[N]` | Yes | Yes (`->n` / `->>n`, JSONB mode) | Unsupported (loud error) until backend-specific lowering lands |
 
-PostgreSQL array matching requires JSONB-backed events (set `json_field`); in flat-column mode there is no array to unnest. LynxDB and other text backends report the object-scope construct as unsupported. Note that Elasticsearch-style backends cannot express positional indexing at all because Lucene arrays are unordered sets; this is exactly why rsigma evaluates the index directly rather than relying on `any`.
+PostgreSQL array matching requires JSONB-backed events (set `json_field`); in flat-column mode there is no array to unnest. The object-scope block and positional indexing both report `UnsupportedArrayMatching` on backends that cannot express them (LynxDB and other text backends today, and PostgreSQL flat-column mode), rather than emitting a query that diverges from the evaluator. A backend advertises positional-index support through `Backend::supports_field_index`. Note that Elasticsearch-style backends cannot express positional indexing at all because Lucene arrays are unordered sets; this is exactly why rsigma evaluates the index directly rather than relying on `any`.
 
 ## See also
 

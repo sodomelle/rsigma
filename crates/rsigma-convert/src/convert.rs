@@ -133,6 +133,23 @@ pub fn convert_collection(
     Ok(output)
 }
 
+/// True if any dot-segment of a field path is a positional array index
+/// (`name[N]`). The `[any]`/`[all]` selectors never reach field names (the
+/// parser desugars them into `Detection::ArrayMatch`), so a bracketed integer
+/// is the positional-index signal.
+fn field_has_positional_index(field: &str) -> bool {
+    field.split('.').any(|seg| {
+        let Some(open) = seg.find('[') else {
+            return false;
+        };
+        if !seg.ends_with(']') {
+            return false;
+        }
+        let inner = &seg[open + 1..seg.len() - 1];
+        !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 /// Default detection-item dispatch logic.
 ///
 /// Used by backends that don't need custom item-level handling.
@@ -146,6 +163,15 @@ pub fn default_convert_detection_item(
         .name
         .as_deref()
         .ok_or(ConvertError::MissingFieldName)?;
+
+    // A positional array index (`field[N]`) reaches conversion as part of the
+    // field path. Backends that cannot lower it must fail loudly rather than
+    // emit a literal field reference that diverges from the evaluator's
+    // element-N semantics.
+    if field_has_positional_index(field_name) && !backend.supports_field_index() {
+        return Err(ConvertError::UnsupportedArrayMatching);
+    }
+
     let modifiers = &item.field.modifiers;
 
     if item.field.has_modifier(rsigma_parser::Modifier::Exists) {

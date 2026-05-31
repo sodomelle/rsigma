@@ -2229,6 +2229,26 @@ detection:
 }
 
 #[test]
+fn array_positional_index_unsupported_in_flat_column_mode() {
+    // Flat-column mode has no JSONB array; a positional index must fail loudly
+    // rather than emit a literal field reference.
+    let backend = PostgresBackend::new();
+    let collection = parse_sigma_yaml(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        args[0]: 'cmd.exe'
+    condition: selection
+"#,
+    )
+    .unwrap();
+    let err = backend.convert_rule(&collection.rules[0], "default", &PipelineState::default());
+    assert!(matches!(err, Err(ConvertError::UnsupportedArrayMatching)));
+}
+
+#[test]
 fn array_unsupported_without_jsonb_mode() {
     // Flat-column mode has no JSONB array to unnest.
     let backend = PostgresBackend::new();

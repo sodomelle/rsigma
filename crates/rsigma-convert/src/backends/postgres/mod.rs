@@ -599,6 +599,12 @@ impl Backend for PostgresBackend {
         self.array_exists_from_expr(&array_expr, quantifier, body, state)
     }
 
+    fn supports_field_index(&self) -> bool {
+        // Positional `field[N]` lowers to JSONB `->n` / `->>n`, but only when
+        // events are stored in a JSONB column; flat columns have no array.
+        self.json_field.is_some()
+    }
+
     // --- Field/value escaping ---
 
     fn escape_and_quote_field(&self, field: &str) -> String {

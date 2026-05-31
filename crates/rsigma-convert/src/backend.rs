@@ -110,6 +110,15 @@ pub trait Backend: Send + Sync {
         Err(ConvertError::UnsupportedArrayMatching)
     }
 
+    /// Whether this backend can lower a positional array index (`field[N]`) in
+    /// a field path. Backends that cannot must not silently emit a literal
+    /// field reference (which would diverge from the evaluator's element-`N`
+    /// semantics); the default item conversion rejects indexed fields with
+    /// `UnsupportedArrayMatching`. PostgreSQL overrides this for JSONB mode.
+    fn supports_field_index(&self) -> bool {
+        false
+    }
+
     // --- Field/value escaping ---
 
     fn escape_and_quote_field(&self, field: &str) -> String;
