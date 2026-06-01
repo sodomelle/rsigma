@@ -123,13 +123,27 @@ impl<'a> Event for JsonEvent<'a> {
 enum PathOp<'a> {
     /// Object key lookup. Distributes over arrays (implicit any-member).
     Key(&'a str),
-    /// Positional array index. Selects one element; never fans out.
-    Index(usize),
+    /// Positional array index, possibly negative. Selects one element; never
+    /// fans out.
+    Index(i64),
+}
+
+/// Resolve a positional index against an array length. Negative indices count
+/// from the end (`-1` is the last element); out-of-range yields `None`.
+pub(crate) fn resolve_array_index(index: i64, len: usize) -> Option<usize> {
+    if index >= 0 {
+        usize::try_from(index).ok().filter(|&i| i < len)
+    } else {
+        usize::try_from(index.unsigned_abs())
+            .ok()
+            .and_then(|abs| len.checked_sub(abs))
+    }
 }
 
 /// Parse a dot path into navigation ops, recognizing positional `name[N]`
-/// (and chained `name[N][M]`). A bracket group that is not a non-negative
-/// integer degrades to a literal object key so it simply fails to match.
+/// (and chained `name[N][M]`, with negative indices counting from the end). A
+/// bracket group that is not an integer degrades to a literal object key so it
+/// simply fails to match.
 fn parse_path_ops(path: &str) -> Vec<PathOp<'_>> {
     let mut ops = Vec::new();
     for part in path.split('.') {
@@ -149,15 +163,15 @@ fn parse_path_ops(path: &str) -> Vec<PathOp<'_>> {
     ops
 }
 
-/// Parse `[N]` or `[N][M]...` into the contained indices, or `None` if any
-/// group is malformed or non-numeric.
-fn parse_index_groups(s: &str) -> Option<Vec<usize>> {
+/// Parse `[N]` or `[N][M]...` into the contained indices (negative allowed), or
+/// `None` if any group is malformed or non-numeric.
+fn parse_index_groups(s: &str) -> Option<Vec<i64>> {
     let mut out = Vec::new();
     let mut rem = s;
     while !rem.is_empty() {
         let rest = rem.strip_prefix('[')?;
         let close = rest.find(']')?;
-        let idx: usize = rest[..close].parse().ok()?;
+        let idx: i64 = rest[..close].parse().ok()?;
         out.push(idx);
         rem = &rest[close + 1..];
     }
@@ -192,7 +206,8 @@ fn collect_by_ops<'a>(current: &'a Value, ops: &[PathOp<'_>], out: &mut Vec<Even
         },
         PathOp::Index(i) => {
             if let Value::Array(arr) = current
-                && let Some(next) = arr.get(*i)
+                && let Some(idx) = resolve_array_index(*i, arr.len())
+                && let Some(next) = arr.get(idx)
             {
                 collect_by_ops(next, rest, out);
             }

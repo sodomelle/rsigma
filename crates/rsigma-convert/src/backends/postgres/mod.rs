@@ -33,10 +33,11 @@ fn validate_sql_identifier(s: &str) -> Result<()> {
     }
 }
 
-/// A JSONB field-path navigation op: an object key or a positional index.
+/// A JSONB field-path navigation op: an object key or a positional index
+/// (possibly negative, counting from the end of the array).
 enum FieldOp {
     Key(String),
-    Index(u32),
+    Index(i64),
 }
 
 /// Return a fresh, query-unique sequence number for naming array-element
@@ -393,7 +394,7 @@ impl PostgresBackend {
                     let close = rest
                         .find(']')
                         .ok_or_else(|| ConvertError::InvalidIdentifier(part.to_string()))?;
-                    let n: u32 = rest[..close]
+                    let n: i64 = rest[..close]
                         .parse()
                         .map_err(|_| ConvertError::InvalidIdentifier(part.to_string()))?;
                     ops.push(FieldOp::Index(n));

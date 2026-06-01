@@ -1699,6 +1699,56 @@ detection:
 }
 
 #[test]
+fn array_negative_index_counts_from_end() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        args[-1]: '-enc'
+    condition: selection
+"#,
+    );
+    // -1 is the last element.
+    assert!(matches(
+        &engine,
+        &json!({"args": ["powershell.exe", "-noprofile", "-enc"]})
+    ));
+    // '-enc' present but not last -> no match (index is exact).
+    assert!(!matches(
+        &engine,
+        &json!({"args": ["powershell.exe", "-enc", "ZQ=="]})
+    ));
+    // Out of range (|index| > len) and non-array -> no match.
+    assert!(!matches(&engine, &json!({"args": []})));
+    assert!(!matches(&engine, &json!({"args": "-enc"})));
+}
+
+#[test]
+fn array_negative_index_dotted_path() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        events[-1].action: 'delete'
+    condition: selection
+"#,
+    );
+    // The last event's action is what matters.
+    assert!(matches(
+        &engine,
+        &json!({"events": [{"action": "create"}, {"action": "delete"}]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"events": [{"action": "delete"}, {"action": "create"}]})
+    ));
+}
+
+#[test]
 fn array_index_inside_quantifier() {
     let engine = make_engine_with_rule(
         r#"

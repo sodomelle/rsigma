@@ -2264,6 +2264,23 @@ detection:
 }
 
 #[test]
+fn array_negative_index_sql() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        args[-1]: '-enc'
+    condition: selection
+"#,
+    );
+    // PostgreSQL JSONB supports negative subscripts (-1 is the last element).
+    let q = &queries[0];
+    assert!(q.contains("data->'args'->>-1 = '-enc'"), "{q}");
+}
+
+#[test]
 fn array_positional_index_dotted_sql() {
     let queries = convert_json(
         r#"

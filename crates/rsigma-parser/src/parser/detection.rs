@@ -254,8 +254,9 @@ fn parse_detection_item(key: &str, value: &Value) -> Result<DetectionItem> {
 /// one of `index` / `quantifier` is set (a segment carries one `[...]`).
 struct PathSegment {
     name: String,
-    /// Positional `[N]` index (stays in the literal field path).
-    index: Option<u32>,
+    /// Positional `[N]` index, possibly negative (`[-1]` is the last element).
+    /// Stays in the literal field path.
+    index: Option<i64>,
     /// `[any]`/`[all]` quantifier (a desugaring point for object-scope blocks).
     quantifier: Option<ArrayQuantifier>,
 }
@@ -415,11 +416,12 @@ fn parse_block_with_prefix(prefix: &str, value: &Value) -> Result<Detection> {
 }
 
 /// Split a field path into dot-separated segments, recognizing the array
-/// selectors `[any]`, `[all]`, and positional `[N]` on the tail of a segment.
+/// selectors `[any]`, `[all]`, `[all_or_empty]`, `[none]`, and positional `[N]`
+/// (negative allowed) on the tail of a segment.
 ///
-/// Only a well-formed `name[any]` / `name[all]` / `name[<integer>]` is treated
-/// as a selector. Any other bracket token is a parse error so typos surface
-/// instead of silently matching a literal field name with brackets.
+/// Only a well-formed quantifier or `name[<integer>]` is treated as a selector.
+/// Any other bracket token is a parse error so typos surface instead of
+/// silently matching a literal field name with brackets.
 fn parse_field_path(field_part: &str) -> Result<Vec<PathSegment>> {
     let mut segments = Vec::new();
     for raw in field_part.split('.') {
@@ -438,12 +440,13 @@ fn parse_field_path(field_part: &str) -> Result<Vec<PathSegment>> {
                 "all" => (None, Some(ArrayQuantifier::All)),
                 "all_or_empty" => (None, Some(ArrayQuantifier::AllOrEmpty)),
                 "none" => (None, Some(ArrayQuantifier::None)),
-                _ => match token.parse::<u32>() {
+                _ => match token.parse::<i64>() {
                     Ok(n) => (Some(n), None),
                     Err(_) => {
                         return Err(SigmaParserError::InvalidFieldSpec(format!(
                             "unknown array selector '[{token}]' in field '{field_part}'; \
-                             only [any], [all], and a non-negative index [N] are supported"
+                             only [any], [all], [all_or_empty], [none], and an integer index \
+                             [N] (negative counts from the end) are supported"
                         )));
                     }
                 },

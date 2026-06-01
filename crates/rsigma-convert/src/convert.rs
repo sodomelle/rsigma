@@ -134,9 +134,9 @@ pub fn convert_collection(
 }
 
 /// True if any dot-segment of a field path is a positional array index
-/// (`name[N]`). The `[any]`/`[all]` selectors never reach field names (the
-/// parser desugars them into `Detection::ArrayMatch`), so a bracketed integer
-/// is the positional-index signal.
+/// (`name[N]`, including a negative `name[-N]`). The quantifier selectors never
+/// reach field names (the parser desugars them into `Detection::ArrayMatch`),
+/// so a bracketed integer is the positional-index signal.
 fn field_has_positional_index(field: &str) -> bool {
     field.split('.').any(|seg| {
         let Some(open) = seg.find('[') else {
@@ -146,7 +146,8 @@ fn field_has_positional_index(field: &str) -> bool {
             return false;
         }
         let inner = &seg[open + 1..seg.len() - 1];
-        !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit())
+        let digits = inner.strip_prefix('-').unwrap_or(inner);
+        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
     })
 }
 

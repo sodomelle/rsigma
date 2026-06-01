@@ -1010,7 +1010,7 @@ fn element_field<'a>(member: &'a EventValue<'a>, path: &str) -> Option<&'a Event
 
 enum EventOp<'a> {
     Key(&'a str),
-    Index(usize),
+    Index(i64),
 }
 
 /// Parse a dot path into navigation ops, recognizing positional `name[N]`.
@@ -1033,8 +1033,9 @@ fn parse_event_ops(path: &str) -> Vec<EventOp<'_>> {
     ops
 }
 
-/// Parse `[N]` or `[N][M]...` into indices, or `None` if malformed/non-numeric.
-fn index_groups(s: &str) -> Option<Vec<usize>> {
+/// Parse `[N]` or `[N][M]...` into indices (negative allowed), or `None` if
+/// malformed/non-numeric.
+fn index_groups(s: &str) -> Option<Vec<i64>> {
     let mut out = Vec::new();
     let mut rem = s;
     while !rem.is_empty() {
@@ -1066,7 +1067,10 @@ fn nav_event_value<'a>(
             _ => None,
         },
         EventOp::Index(i) => match current {
-            EventValue::Array(members) => nav_event_value(members.get(*i)?, rest),
+            EventValue::Array(members) => {
+                let idx = crate::event::resolve_array_index(*i, members.len())?;
+                nav_event_value(members.get(idx)?, rest)
+            }
             _ => None,
         },
     }

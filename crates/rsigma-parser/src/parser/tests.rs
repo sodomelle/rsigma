@@ -1623,6 +1623,17 @@ fn array_positional_index_scalar_is_plain_field() {
 }
 
 #[test]
+fn array_negative_index_is_plain_field() {
+    // `args[-1]: x` keeps the negative index marker in the literal field path.
+    let det = parse_selection("    selection:\n        args[-1]: \"-enc\"\n");
+    let Detection::AllOf(items) = det else {
+        panic!("expected AllOf, got {det:?}");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].field.name.as_deref(), Some("args[-1]"));
+}
+
+#[test]
 fn array_positional_index_with_modifier_and_dotted_path() {
     let det = parse_selection("    selection:\n        connections[0].ip|cidr: \"10.0.0.0/8\"\n");
     let Detection::AllOf(items) = det else {
