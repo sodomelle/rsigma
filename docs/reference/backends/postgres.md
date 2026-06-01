@@ -141,11 +141,13 @@ Each path segment is validated against the SQL identifier regex (`^[A-Za-z_][A-Z
 
 In JSONB mode the backend lowers the experimental [array matching](../../guide/array-matching.md) constructs:
 
-- **Positional index** `field[N]` emits `->n` / `->>n`:
+- **Positional index** `field[N]` emits `->n` / `->>n`. Negative indices use PostgreSQL's native negative subscripts (`->-1`, PG 11+):
 
 ```sql
 -- Sigma field: args[0]
 data->'args'->>0
+-- Sigma field: args[-1]  (last element)
+data->'args'->>-1
 ```
 
 - **Object-scope blocks** `field[any]:` / `field[all]:` emit an `EXISTS` over `jsonb_array_elements`, guarded by `jsonb_typeof(...) = 'array'`:
@@ -158,7 +160,17 @@ data->'args'->>0
     AND (__sigma_e0->>'ip')::inet <<= '123.1.0.0/16'::cidr))
 ```
 
-`[all]` adds a non-empty guard and `NOT EXISTS (... WHERE NOT (...))`. Array matching requires JSONB mode; in flat-column mode the backend reports `UnsupportedArrayMatching`.
+`[all]` adds a non-empty guard and `NOT EXISTS (... WHERE NOT (...))`. Because `[none]` and `[all_or_empty]` must match an empty or missing array, they lower to a `CASE` that only unnests an actual array and treats a missing/null value as a match:
+
+```sql
+-- containers[none]: { privileged: 'true' }
+(CASE WHEN jsonb_typeof(data->'containers') = 'array'
+  THEN NOT EXISTS (SELECT 1 FROM jsonb_array_elements(data->'containers') AS __sigma_e0
+    WHERE __sigma_e0->>'privileged' = 'true')
+  ELSE data->'containers' IS NULL OR jsonb_typeof(data->'containers') = 'null' END)
+```
+
+`[all_or_empty]` uses the same shape with `WHERE NOT (...)`. Array matching requires JSONB mode; in flat-column mode the backend reports `UnsupportedArrayMatching`.
 
 ## Correlation rules
 
