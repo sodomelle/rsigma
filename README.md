@@ -395,6 +395,8 @@ The daemon emits Prometheus metrics on `/metrics` and structured JSON logs to st
 
 ## Architecture
 
+![rsigma streaming detection architecture](assets/architecture.svg)
+
 Everything starts with a Sigma rule in YAML format:
 
 - **Parsing:** `yaml_serde` deserializes the YAML into a raw value, then `rsigma-parser` turns it into a strongly-typed AST. A PEG grammar (`sigma.pest`) handles the document structure while a Pratt parser (`condition.rs`) handles condition expressions. Supporting modules define value types (`value.rs`: `SigmaStr`, wildcards, timespans) and AST nodes (`ast.rs`: modifiers, enums). The result is a `SigmaRule`, `CorrelationRule`, `FilterRule`, or `SigmaCollection`.
@@ -552,7 +554,11 @@ Feature-gated items are marked with \* in the diagram.
 
 </details>
 
-A [Mermaid version](assets/architecture.mmd) of this diagram is also available.
+The crate-level view, with every module and all four execution shapes, is rendered separately:
+
+![rsigma internal architecture](assets/internal_architecture.svg)
+
+A [Mermaid version](assets/architecture.mmd) of this diagram is also available. The rendered diagrams above are `assets/architecture.svg` and `assets/internal_architecture.svg`.
 
 ## Performance
 

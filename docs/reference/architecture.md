@@ -4,7 +4,15 @@ RSigma is a workspace of six crates organised around one principle: rule process
 
 For operator-facing material see the [User Guide](../guide/evaluating-rules.md). For per-crate API docs see [docs.rs/rsigma](https://docs.rs/rsigma).
 
+## Ecosystem
+
+The streaming-detection ecosystem at a glance: rules, pipelines, dynamic sources, and log events flow into the engine, which fans out to enrichment, sinks, and downstream systems.
+
+![rsigma streaming detection architecture](https://raw.githubusercontent.com/timescale/rsigma/main/assets/architecture.svg)
+
 ## Crate map
+
+The crate-level view below is also available as a [rendered SVG](https://raw.githubusercontent.com/timescale/rsigma/main/assets/internal_architecture.svg).
 
 ```mermaid
 flowchart TD
