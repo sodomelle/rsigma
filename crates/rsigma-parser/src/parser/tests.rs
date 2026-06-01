@@ -1449,6 +1449,21 @@ fn array_object_scope_block_all() {
 }
 
 #[test]
+fn array_object_scope_block_none() {
+    let det = parse_selection(
+        "    selection:\n        containers[none]:\n            privileged: \"true\"\n",
+    );
+    let Detection::ArrayMatch {
+        field, quantifier, ..
+    } = det
+    else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    assert_eq!(field, "containers");
+    assert_eq!(quantifier, ArrayQuantifier::None);
+}
+
+#[test]
 fn array_path_shorthand_desugars_to_block() {
     let det = parse_selection("    selection:\n        connections[any].ip: \"1.2.3.1\"\n");
     let Detection::ArrayMatch {

@@ -902,7 +902,7 @@ where
             body,
         } => match event.get_field(field) {
             Some(value) => eval_array_quantified(&value, *quantifier, body, event),
-            None => false,
+            None => array_quantifier_matches_empty(*quantifier),
         },
         CompiledDetection::And(dets) => dets
             .iter()
@@ -927,10 +927,22 @@ fn eval_array_quantified<E: Event>(
             ArrayQuantifier::All => {
                 !members.is_empty() && members.iter().all(|m| eval_array_body(body, m, outer))
             }
+            ArrayQuantifier::None => !members.iter().any(|m| eval_array_body(body, m, outer)),
         },
-        EventValue::Null => false,
-        single => eval_array_body(body, single, outer),
+        // A null or missing array is empty: `none` holds vacuously, the others
+        // do not.
+        EventValue::Null => array_quantifier_matches_empty(quantifier),
+        // A scalar (non-array, non-null) value is a single-member array.
+        single => match quantifier {
+            ArrayQuantifier::None => !eval_array_body(body, single, outer),
+            _ => eval_array_body(body, single, outer),
+        },
     }
+}
+
+/// Whether a quantifier matches an empty or missing array (zero members).
+fn array_quantifier_matches_empty(quantifier: ArrayQuantifier) -> bool {
+    matches!(quantifier, ArrayQuantifier::None)
 }
 
 /// Evaluate a compiled detection `body` against a single array member.
@@ -950,7 +962,7 @@ fn eval_array_body<E: Event>(body: &CompiledDetection, member: &EventValue, oute
             body: inner,
         } => match element_field(member, field) {
             Some(value) => eval_array_quantified(value, *quantifier, inner, outer),
-            None => false,
+            None => array_quantifier_matches_empty(*quantifier),
         },
         // Keywords inside an element scope match the member value directly.
         CompiledDetection::Keywords(matcher) => matcher.matches(member, outer),

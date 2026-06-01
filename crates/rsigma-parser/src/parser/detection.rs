@@ -436,6 +436,7 @@ fn parse_field_path(field_part: &str) -> Result<Vec<PathSegment>> {
             let (index, quantifier) = match token {
                 "any" => (None, Some(ArrayQuantifier::Any)),
                 "all" => (None, Some(ArrayQuantifier::All)),
+                "none" => (None, Some(ArrayQuantifier::None)),
                 _ => match token.parse::<u32>() {
                     Ok(n) => (Some(n), None),
                     Err(_) => {

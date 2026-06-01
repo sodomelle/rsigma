@@ -1724,3 +1724,49 @@ detection:
         &json!({"rules": [{"ip": ["8.8.8.8", "10.0.0.1"]}]})
     ));
 }
+
+#[test]
+fn array_object_scope_none_is_dual_of_any() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        containers[none]:
+            image|startswith: 'evil/'
+    condition: selection
+"#,
+    );
+    // No container runs an evil image -> match.
+    assert!(matches(
+        &engine,
+        &json!({"containers": [{"image": "nginx"}, {"image": "redis"}]})
+    ));
+    // One container runs an evil image -> no match.
+    assert!(!matches(
+        &engine,
+        &json!({"containers": [{"image": "nginx"}, {"image": "evil/miner"}]})
+    ));
+    // An empty or missing array matches `none` (no member satisfies the body).
+    assert!(matches(&engine, &json!({"containers": []})));
+    assert!(matches(&engine, &json!({"other": 1})));
+}
+
+#[test]
+fn array_scalar_member_none() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        tags[none]: 'admin'
+    condition: selection
+"#,
+    );
+    assert!(matches(&engine, &json!({"tags": ["user", "guest"]})));
+    assert!(!matches(&engine, &json!({"tags": ["user", "admin"]})));
+    assert!(matches(&engine, &json!({"tags": []})));
+    assert!(matches(&engine, &json!({"other": 1})));
+}

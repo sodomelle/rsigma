@@ -354,6 +354,11 @@ pub enum ArrayQuantifier {
     /// Every array member must satisfy the nested detection, and the array
     /// must be non-empty.
     All,
+    /// No array member satisfies the nested detection (the dual of [`Any`]).
+    /// Matches an empty or missing array (vacuously, no member matches).
+    ///
+    /// [`Any`]: ArrayQuantifier::Any
+    None,
 }
 
 impl fmt::Display for ArrayQuantifier {
@@ -361,6 +366,7 @@ impl fmt::Display for ArrayQuantifier {
         match self {
             ArrayQuantifier::Any => write!(f, "any"),
             ArrayQuantifier::All => write!(f, "all"),
+            ArrayQuantifier::None => write!(f, "none"),
         }
     }
 }

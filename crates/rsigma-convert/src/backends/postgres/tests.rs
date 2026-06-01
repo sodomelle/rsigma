@@ -2114,6 +2114,34 @@ detection:
 }
 
 #[test]
+fn array_none_object_scope_emits_guarded_not_exists() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        containers[none]:
+            privileged: 'true'
+    condition: selection
+"#,
+    );
+    // `none` must match an empty/missing array, so it lowers to a CASE that
+    // only runs jsonb_array_elements on an actual array and treats a
+    // missing/null value as a match.
+    assert_eq!(
+        queries,
+        vec![
+            "SELECT * FROM security_events WHERE \
+             (CASE WHEN jsonb_typeof(data->'containers') = 'array' \
+             THEN NOT EXISTS (SELECT 1 FROM jsonb_array_elements(data->'containers') AS __sigma_e0 \
+             WHERE __sigma_e0->>'privileged' = 'true') \
+             ELSE data->'containers' IS NULL OR jsonb_typeof(data->'containers') = 'null' END)"
+        ]
+    );
+}
+
+#[test]
 fn array_scalar_member_uses_elements_text() {
     let queries = convert_json(
         r#"
