@@ -1449,6 +1449,21 @@ fn array_object_scope_block_all() {
 }
 
 #[test]
+fn array_object_scope_block_all_or_empty() {
+    let det = parse_selection(
+        "    selection:\n        connections[all_or_empty]:\n            protocol: \"TCP\"\n",
+    );
+    let Detection::ArrayMatch {
+        field, quantifier, ..
+    } = det
+    else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    assert_eq!(field, "connections");
+    assert_eq!(quantifier, ArrayQuantifier::AllOrEmpty);
+}
+
+#[test]
 fn array_object_scope_block_none() {
     let det = parse_selection(
         "    selection:\n        containers[none]:\n            privileged: \"true\"\n",

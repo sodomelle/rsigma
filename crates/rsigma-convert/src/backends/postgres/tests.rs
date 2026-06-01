@@ -2114,6 +2114,34 @@ detection:
 }
 
 #[test]
+fn array_all_or_empty_object_scope_drops_nonempty_guard() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[all_or_empty]:
+            protocol: 'TCP'
+    condition: selection
+"#,
+    );
+    // No jsonb_array_length(...) > 0 guard (that is the `all`-only difference);
+    // an empty/missing array matches via the CASE ELSE branch.
+    assert_eq!(
+        queries,
+        vec![
+            "SELECT * FROM security_events WHERE \
+             (CASE WHEN jsonb_typeof(data->'connections') = 'array' \
+             THEN NOT EXISTS (SELECT 1 FROM jsonb_array_elements(data->'connections') AS __sigma_e0 \
+             WHERE NOT (__sigma_e0->>'protocol' = 'TCP')) \
+             ELSE data->'connections' IS NULL OR jsonb_typeof(data->'connections') = 'null' END)"
+        ]
+    );
+    assert!(!queries[0].contains("jsonb_array_length"), "{}", queries[0]);
+}
+
+#[test]
 fn array_none_object_scope_emits_guarded_not_exists() {
     let queries = convert_json(
         r#"

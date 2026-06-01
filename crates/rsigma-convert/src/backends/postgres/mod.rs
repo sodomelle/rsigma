@@ -485,6 +485,15 @@ impl PostgresBackend {
                  AND NOT EXISTS \
                  (SELECT 1 FROM {srf}({array_expr}) AS {alias} WHERE NOT ({body_sql})))"
             ),
+            // `all_or_empty` is `all` minus the non-empty guard, and it also
+            // matches a missing/null array. Same CASE shape as `none` so the
+            // empty/missing cases match without running jsonb_array_elements on
+            // a scalar.
+            ArrayQuantifier::AllOrEmpty => format!(
+                "(CASE WHEN jsonb_typeof({array_expr}) = 'array' \
+                 THEN NOT EXISTS (SELECT 1 FROM {srf}({array_expr}) AS {alias} WHERE NOT ({body_sql})) \
+                 ELSE {array_expr} IS NULL OR jsonb_typeof({array_expr}) = 'null' END)"
+            ),
             // `none` matches an empty or missing array, so it cannot use the
             // `typeof = 'array' AND ...` guard (that would reject empty/missing).
             // A CASE guarantees `jsonb_array_elements` is only evaluated on an

@@ -1754,6 +1754,33 @@ detection:
 }
 
 #[test]
+fn array_object_scope_all_or_empty_matches_empty() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[all_or_empty]:
+            protocol: 'TCP'
+    condition: selection
+"#,
+    );
+    // Like `all` when non-empty: every member must satisfy.
+    assert!(matches(
+        &engine,
+        &json!({"connections": [{"protocol": "TCP"}, {"protocol": "TCP"}]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [{"protocol": "TCP"}, {"protocol": "UDP"}]})
+    ));
+    // Unlike `all`, an empty or missing array matches (vacuously true).
+    assert!(matches(&engine, &json!({"connections": []})));
+    assert!(matches(&engine, &json!({"other": 1})));
+}
+
+#[test]
 fn array_scalar_member_none() {
     let engine = make_engine_with_rule(
         r#"

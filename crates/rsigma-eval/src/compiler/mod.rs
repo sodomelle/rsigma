@@ -927,6 +927,7 @@ fn eval_array_quantified<E: Event>(
             ArrayQuantifier::All => {
                 !members.is_empty() && members.iter().all(|m| eval_array_body(body, m, outer))
             }
+            ArrayQuantifier::AllOrEmpty => members.iter().all(|m| eval_array_body(body, m, outer)),
             ArrayQuantifier::None => !members.iter().any(|m| eval_array_body(body, m, outer)),
         },
         // A null or missing array is empty: `none` holds vacuously, the others
@@ -942,7 +943,10 @@ fn eval_array_quantified<E: Event>(
 
 /// Whether a quantifier matches an empty or missing array (zero members).
 fn array_quantifier_matches_empty(quantifier: ArrayQuantifier) -> bool {
-    matches!(quantifier, ArrayQuantifier::None)
+    matches!(
+        quantifier,
+        ArrayQuantifier::None | ArrayQuantifier::AllOrEmpty
+    )
 }
 
 /// Evaluate a compiled detection `body` against a single array member.
