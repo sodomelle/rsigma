@@ -501,8 +501,7 @@ fn is_action_fragment(m: &yaml_serde::Mapping) -> bool {
 // Public API
 // =============================================================================
 
-/// Lint a single YAML document value.
-pub fn lint_yaml_value(value: &Value) -> Vec<LintWarning> {
+fn lint_yaml_value_ext(value: &Value, extra_ns: &[String]) -> Vec<LintWarning> {
     let Some(m) = value.as_mapping() else {
         return vec![err(
             LintRule::NotAMapping,
@@ -521,7 +520,7 @@ pub fn lint_yaml_value(value: &Value) -> Vec<LintWarning> {
 
     let doc_type = detect_doc_type(m);
     match doc_type {
-        DocType::Detection => rules::detection::lint_detection_rule(m, &mut warnings),
+        DocType::Detection => rules::detection::lint_detection_rule(m, &mut warnings, extra_ns),
         DocType::Correlation => rules::correlation::lint_correlation_rule(m, &mut warnings),
         DocType::Filter => rules::filter::lint_filter_rule(m, &mut warnings),
     }
@@ -529,6 +528,11 @@ pub fn lint_yaml_value(value: &Value) -> Vec<LintWarning> {
     rules::shared::lint_unknown_keys(m, doc_type, &mut warnings);
 
     warnings
+}
+
+/// Lint a single YAML document value.
+pub fn lint_yaml_value(value: &Value) -> Vec<LintWarning> {
+    lint_yaml_value_ext(value, &[])
 }
 
 /// Lint a raw YAML string, returning warnings with resolved source spans.
@@ -752,6 +756,8 @@ pub struct LintConfig {
     pub disabled_rules: HashSet<String>,
     pub severity_overrides: HashMap<String, Severity>,
     pub exclude_patterns: Vec<String>,
+    /// Extra tag namespaces recognised in addition to the built-in set.
+    pub tag_namespaces: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -762,6 +768,8 @@ struct RawLintConfig {
     severity_overrides: HashMap<String, String>,
     #[serde(default)]
     exclude: Vec<String>,
+    #[serde(default)]
+    tag_namespaces: Vec<String>,
 }
 
 impl LintConfig {
@@ -790,6 +798,7 @@ impl LintConfig {
             disabled_rules,
             severity_overrides,
             exclude_patterns: raw.exclude,
+            tag_namespaces: raw.tag_namespaces,
         })
     }
 
@@ -822,6 +831,8 @@ impl LintConfig {
         }
         self.exclude_patterns
             .extend(other.exclude_patterns.iter().cloned());
+        self.tag_namespaces
+            .extend(other.tag_namespaces.iter().cloned());
     }
 
     pub fn is_disabled(&self, rule: &LintRule) -> bool {
@@ -971,9 +982,38 @@ pub fn apply_suppressions(
 }
 
 pub fn lint_yaml_str_with_config(text: &str, config: &LintConfig) -> Vec<LintWarning> {
-    let warnings = lint_yaml_str(text);
+    let mut all_warnings = Vec::new();
+
+    for doc in yaml_serde::Deserializer::from_str(text) {
+        let value: Value = match Value::deserialize(doc) {
+            Ok(v) => v,
+            Err(e) => {
+                let mut w = err(
+                    LintRule::YamlParseError,
+                    format!("YAML parse error: {e}"),
+                    "/",
+                );
+                if let Some(loc) = e.location() {
+                    w.span = Some(Span {
+                        start_line: loc.line().saturating_sub(1) as u32,
+                        start_col: loc.column() as u32,
+                        end_line: loc.line().saturating_sub(1) as u32,
+                        end_col: loc.column() as u32 + 1,
+                    });
+                }
+                all_warnings.push(w);
+                break;
+            }
+        };
+
+        for mut w in lint_yaml_value_ext(&value, &config.tag_namespaces) {
+            w.span = resolve_path_to_span(text, &w.path);
+            all_warnings.push(w);
+        }
+    }
+
     let inline = parse_inline_suppressions(text);
-    apply_suppressions(warnings, config, &inline)
+    apply_suppressions(all_warnings, config, &inline)
 }
 
 pub fn lint_yaml_file_with_config(
@@ -1537,6 +1577,7 @@ detection:
                 .into_iter()
                 .collect(),
             exclude_patterns: vec!["test/**".to_string()],
+            ..Default::default()
         };
 
         base.merge(&other);
@@ -1714,5 +1755,47 @@ EventID: 4624
         for key_str in ALL_LINT_KEYS {
             assert!(KEY_CACHE.contains_key(key_str), "key not cached: {key_str}");
         }
+    }
+
+    #[test]
+    fn extra_tag_namespace_suppresses_warning() {
+        let text = r#"title: Test
+logsource:
+    category: test
+detection:
+    selection:
+        field: value
+    condition: selection
+level: medium
+tags:
+    - myorg.custom_tag
+"#;
+        // Without extra namespaces, unknown_tag_namespace fires.
+        let warnings = lint_yaml_str(text);
+        assert!(has_rule(&warnings, LintRule::UnknownTagNamespace));
+
+        // With "myorg" added, the warning is gone.
+        let config = LintConfig {
+            tag_namespaces: vec!["myorg".to_string()],
+            ..Default::default()
+        };
+        let warnings = lint_yaml_str_with_config(text, &config);
+        assert!(has_no_rule(&warnings, LintRule::UnknownTagNamespace));
+    }
+
+    #[test]
+    fn extra_tag_namespace_from_config_file() {
+        let yaml = r#"
+tag_namespaces:
+  - myorg
+  - internal
+"#;
+        let tmp = std::env::temp_dir().join("rsigma_test_tag_ns.yml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let config = LintConfig::load(&tmp).unwrap();
+        std::fs::remove_file(&tmp).ok();
+
+        assert!(config.tag_namespaces.contains(&"myorg".to_string()));
+        assert!(config.tag_namespaces.contains(&"internal".to_string()));
     }
 }
