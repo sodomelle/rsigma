@@ -358,6 +358,9 @@ fn detection_contains_item(detection: &Detection, field: &str, value: Option<&st
         Detection::And(subs) => subs
             .iter()
             .any(|sub| detection_contains_item(sub, field, value)),
+        Detection::Conditional { named, .. } => named
+            .values()
+            .any(|sub| detection_contains_item(sub, field, value)),
         Detection::Keywords(_) => false,
     }
 }

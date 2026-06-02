@@ -1449,6 +1449,44 @@ fn array_object_scope_block_all() {
 }
 
 #[test]
+fn array_extended_block_parses_condition_and_named() {
+    let det = parse_selection(
+        "    selection:\n        connections[any]:\n            condition: in_cidr and not is_tcp\n            in_cidr:\n                ip|cidr: \"123.1.0.0/16\"\n            is_tcp:\n                protocol: \"TCP\"\n",
+    );
+    let Detection::ArrayMatch {
+        field,
+        quantifier,
+        body,
+    } = det
+    else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    assert_eq!(field, "connections");
+    assert_eq!(quantifier, ArrayQuantifier::Any);
+    let Detection::Conditional { named, condition } = *body else {
+        panic!("expected Conditional body");
+    };
+    assert_eq!(named.len(), 2);
+    assert!(named.contains_key("in_cidr"));
+    assert!(named.contains_key("is_tcp"));
+    // `in_cidr and not is_tcp` -> And([Identifier, Not(Identifier)]).
+    let ConditionExpr::And(parts) = condition else {
+        panic!("expected And condition, got {condition:?}");
+    };
+    assert_eq!(parts.len(), 2);
+    assert!(matches!(parts[1], ConditionExpr::Not(_)));
+}
+
+#[test]
+fn array_extended_block_requires_named_selections() {
+    // A `condition:` with no sibling selections is an error.
+    let yaml = "title: T\nlogsource:\n    category: test\ndetection:\n    selection:\n        connections[any]:\n            condition: foo\n    condition: selection\n";
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    assert!(collection.rules.is_empty());
+    assert!(!collection.errors.is_empty());
+}
+
+#[test]
 fn array_object_scope_block_all_or_empty() {
     let det = parse_selection(
         "    selection:\n        connections[all_or_empty]:\n            protocol: \"TCP\"\n",

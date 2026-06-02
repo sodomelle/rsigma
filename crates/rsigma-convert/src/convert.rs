@@ -346,5 +346,95 @@ pub fn default_convert_detection(
                 .collect::<Result<Vec<_>>>()?;
             backend.convert_condition_and(&parts)
         }
+        // Extended array block body: lower each named sub-selection, then fold
+        // them per the `condition` (and/or/not). Reached when a backend's
+        // `convert_array_match` recurses into a `condition:` block body
+        // relative to the per-element binding.
+        rsigma_parser::Detection::Conditional { named, condition } => {
+            convert_block_condition(backend, condition, named, state)
+        }
+    }
+}
+
+/// Lower an extended array block-body `condition` into a single boolean
+/// expression by converting each referenced named sub-selection and combining
+/// them with the backend's `and`/`or`/`not` (and selector expansion).
+fn convert_block_condition(
+    backend: &dyn Backend,
+    expr: &rsigma_parser::ConditionExpr,
+    named: &std::collections::HashMap<String, rsigma_parser::Detection>,
+    state: &mut ConversionState,
+) -> Result<String> {
+    use rsigma_parser::{ConditionExpr, Quantifier, SelectorPattern};
+    match expr {
+        ConditionExpr::Identifier(name) => {
+            let det = named
+                .get(name)
+                .ok_or_else(|| ConvertError::InvalidIdentifier(name.clone()))?;
+            backend.convert_detection(det, state)
+        }
+        ConditionExpr::And(exprs) => {
+            // Parenthesize OR sub-expressions: SQL `AND` binds tighter than
+            // `OR`, so `a AND (b OR c)` must keep the OR grouped.
+            let parts = exprs
+                .iter()
+                .map(|e| {
+                    let sql = convert_block_condition(backend, e, named, state)?;
+                    Ok(if matches!(e, ConditionExpr::Or(_)) {
+                        format!("({sql})")
+                    } else {
+                        sql
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            backend.convert_condition_and(&parts)
+        }
+        ConditionExpr::Or(exprs) => {
+            let parts = exprs
+                .iter()
+                .map(|e| convert_block_condition(backend, e, named, state))
+                .collect::<Result<Vec<_>>>()?;
+            backend.convert_condition_or(&parts)
+        }
+        ConditionExpr::Not(inner) => {
+            let part = convert_block_condition(backend, inner, named, state)?;
+            // Parenthesize: SQL `NOT` binds looser than the inner comparison
+            // operators, so a bare multi-token operand would mis-associate.
+            backend.convert_condition_not(&format!("({part})"))
+        }
+        ConditionExpr::Selector {
+            quantifier,
+            pattern,
+        } => {
+            let mut names: Vec<&String> = match pattern {
+                SelectorPattern::Them => named.keys().filter(|n| !n.starts_with('_')).collect(),
+                SelectorPattern::Pattern(pat) => named
+                    .keys()
+                    .filter(|n| pattern_matches_name(pat, n))
+                    .collect(),
+            };
+            names.sort();
+            let parts = names
+                .iter()
+                .map(|n| backend.convert_detection(&named[*n], state))
+                .collect::<Result<Vec<_>>>()?;
+            match quantifier {
+                Quantifier::Any => backend.convert_condition_or(&parts),
+                Quantifier::All => backend.convert_condition_and(&parts),
+                Quantifier::Count(_) => Err(ConvertError::UnsupportedArrayMatching),
+            }
+        }
+    }
+}
+
+/// Glob match for selector patterns (`x_*`, `*suffix`) within a block body,
+/// mirroring the engine's `pattern_matches`.
+fn pattern_matches_name(pattern: &str, name: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        name.starts_with(prefix)
+    } else if let Some(suffix) = pattern.strip_prefix('*') {
+        name.ends_with(suffix)
+    } else {
+        pattern == name
     }
 }

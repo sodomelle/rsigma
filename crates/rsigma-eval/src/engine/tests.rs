@@ -1831,6 +1831,104 @@ detection:
 }
 
 #[test]
+fn array_extended_block_per_element_negation() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[any]:
+            condition: in_cidr and not is_tcp
+            in_cidr:
+                ip|cidr: '123.1.0.0/16'
+            is_tcp:
+                protocol: 'TCP'
+    condition: selection
+"#,
+    );
+    // One element is in-CIDR and UDP (not TCP) -> match.
+    assert!(matches(
+        &engine,
+        &json!({"connections": [
+            {"protocol": "TCP", "ip": "10.0.0.1"},
+            {"protocol": "UDP", "ip": "123.1.9.9"}
+        ]})
+    ));
+    // In-CIDR only on the TCP element; the UDP element is out of CIDR. No
+    // single element is both in-CIDR and non-TCP -> no match (per-element bind).
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [
+            {"protocol": "TCP", "ip": "123.1.9.9"},
+            {"protocol": "UDP", "ip": "10.0.0.1"}
+        ]})
+    ));
+}
+
+#[test]
+fn array_extended_block_per_element_disjunction() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        events[any]:
+            condition: is_delete or is_drop
+            is_delete:
+                action: 'delete'
+            is_drop:
+                action: 'drop'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"events": [{"action": "create"}, {"action": "drop"}]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"events": [{"action": "create"}, {"action": "update"}]})
+    ));
+}
+
+#[test]
+fn array_extended_block_all_quantifier() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        mounts[all]:
+            condition: readonly and not is_proc
+            readonly:
+                mode: 'ro'
+            is_proc:
+                path|startswith: '/proc'
+    condition: selection
+"#,
+    );
+    // Every mount is read-only and none under /proc -> match.
+    assert!(matches(
+        &engine,
+        &json!({"mounts": [
+            {"mode": "ro", "path": "/data"},
+            {"mode": "ro", "path": "/etc"}
+        ]})
+    ));
+    // One mount is read-write -> no match (all required).
+    assert!(!matches(
+        &engine,
+        &json!({"mounts": [
+            {"mode": "ro", "path": "/data"},
+            {"mode": "rw", "path": "/etc"}
+        ]})
+    ));
+}
+
+#[test]
 fn array_scalar_member_none() {
     let engine = make_engine_with_rule(
         r#"

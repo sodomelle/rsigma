@@ -2142,6 +2142,39 @@ detection:
 }
 
 #[test]
+fn array_extended_block_lowers_boolean_inner_predicate() {
+    let queries = convert_json(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[any]:
+            condition: in_cidr and not is_tcp
+            in_cidr:
+                ip|cidr: '123.1.0.0/16'
+            is_tcp:
+                protocol: 'TCP'
+    condition: selection
+"#,
+    );
+    let q = &queries[0];
+    // Same EXISTS primitive as the basic block, with a richer inner predicate.
+    assert!(
+        q.contains("EXISTS (SELECT 1 FROM jsonb_array_elements(data->'connections') AS __sigma_e0"),
+        "{q}"
+    );
+    assert!(
+        q.contains("(__sigma_e0->>'ip')::inet <<= '123.1.0.0/16'::cidr"),
+        "{q}"
+    );
+    // The per-element negation lowers to a SQL NOT inside the element scope.
+    assert!(q.contains("NOT ("), "{q}");
+    assert!(q.contains("__sigma_e0->>'protocol' = 'TCP'"), "{q}");
+    assert!(q.contains(" AND "), "{q}");
+}
+
+#[test]
 fn array_none_object_scope_emits_guarded_not_exists() {
     let queries = convert_json(
         r#"

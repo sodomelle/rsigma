@@ -190,6 +190,11 @@ impl Collector {
                     self.collect_detection_items(sub, rule_title, source);
                 }
             }
+            Detection::Conditional { named, .. } => {
+                for sub in named.values() {
+                    self.collect_detection_items(sub, rule_title, source);
+                }
+            }
             Detection::Keywords(_) => {}
         }
     }

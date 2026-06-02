@@ -434,6 +434,19 @@ pub enum Detection {
     /// plain detection items with one or more array object-scope blocks, which
     /// [`Detection::AllOf`] (a list of simple items) cannot represent.
     And(Vec<Detection>),
+    /// Extended object-scope block body: named element-scoped sub-selections
+    /// combined by a `condition` expression (the recursive "mini-event" form),
+    /// enabling per-element `and`/`or`/`not`. Produced only as an
+    /// [`ArrayMatch`](Detection::ArrayMatch) body when the block map carries a
+    /// `condition:` key. The basic conjunction-map body is the degenerate case
+    /// (an implicit AND of items); this is the explicit-condition form.
+    Conditional {
+        /// Element-scoped named sub-selections (each a nested detection).
+        named: HashMap<String, Detection>,
+        /// Boolean combination of the named sub-selections, evaluated per
+        /// array member.
+        condition: ConditionExpr,
+    },
 }
 
 /// The complete detection section of a Sigma rule.

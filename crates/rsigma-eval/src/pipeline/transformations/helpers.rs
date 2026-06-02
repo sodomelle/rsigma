@@ -184,6 +184,18 @@ where
                 )?;
             }
         }
+        Detection::Conditional { named, .. } => {
+            for sub in named.values_mut() {
+                transform_detection_fields(
+                    sub,
+                    state,
+                    field_name_conditions,
+                    field_name_cond_not,
+                    transform_fn,
+                    rule_title,
+                )?;
+            }
+        }
         Detection::Keywords(_) => {}
     }
     Ok(())
@@ -288,6 +300,17 @@ fn drop_from_detection(
         }
         Detection::And(subs) => {
             for sub in subs.iter_mut() {
+                drop_from_detection(
+                    sub,
+                    state,
+                    detection_conditions,
+                    field_name_conditions,
+                    field_name_cond_not,
+                );
+            }
+        }
+        Detection::Conditional { named, .. } => {
+            for sub in named.values_mut() {
                 drop_from_detection(
                     sub,
                     state,
@@ -458,6 +481,20 @@ fn replace_strings_in_detection(
                 );
             }
         }
+        Detection::Conditional { named, .. } => {
+            for sub in named.values_mut() {
+                replace_strings_in_detection(
+                    sub,
+                    state,
+                    detection_conditions,
+                    field_name_conditions,
+                    field_name_cond_not,
+                    re,
+                    replacement,
+                    skip_special,
+                );
+            }
+        }
         Detection::Keywords(values) => {
             replace_strings_in_values(values, re, replacement, skip_special);
         }
@@ -555,6 +592,11 @@ fn expand_placeholders_in_detection(
         }
         Detection::And(subs) => {
             for sub in subs.iter_mut() {
+                expand_placeholders_in_detection(sub, state, wildcard);
+            }
+        }
+        Detection::Conditional { named, .. } => {
+            for sub in named.values_mut() {
                 expand_placeholders_in_detection(sub, state, wildcard);
             }
         }
@@ -747,6 +789,11 @@ fn decompose_hashes_in_detection(
                 decompose_hashes_in_detection(sub, valid_algos, field_prefix, drop_algo_prefix);
             }
         }
+        Detection::Conditional { named, .. } => {
+            for sub in named.values_mut() {
+                decompose_hashes_in_detection(sub, valid_algos, field_prefix, drop_algo_prefix);
+            }
+        }
         Detection::Keywords(_) => {}
     }
 }
@@ -821,6 +868,18 @@ fn map_strings_in_detection(
         }
         Detection::And(subs) => {
             for sub in subs.iter_mut() {
+                map_strings_in_detection(
+                    sub,
+                    state,
+                    detection_conditions,
+                    field_name_conditions,
+                    field_name_cond_not,
+                    mapping,
+                );
+            }
+        }
+        Detection::Conditional { named, .. } => {
+            for sub in named.values_mut() {
                 map_strings_in_detection(
                     sub,
                     state,
@@ -952,6 +1011,18 @@ fn set_values_in_detection(
                 );
             }
         }
+        Detection::Conditional { named, .. } => {
+            for sub in named.values_mut() {
+                set_values_in_detection(
+                    sub,
+                    state,
+                    detection_conditions,
+                    field_name_conditions,
+                    field_name_cond_not,
+                    value,
+                );
+            }
+        }
         Detection::Keywords(_) => {}
     }
 }
@@ -1028,6 +1099,18 @@ fn convert_types_in_detection(
         }
         Detection::And(subs) => {
             for sub in subs.iter_mut() {
+                convert_types_in_detection(
+                    sub,
+                    state,
+                    detection_conditions,
+                    field_name_conditions,
+                    field_name_cond_not,
+                    target_type,
+                );
+            }
+        }
+        Detection::Conditional { named, .. } => {
+            for sub in named.values_mut() {
                 convert_types_in_detection(
                     sub,
                     state,
@@ -1174,6 +1257,18 @@ fn apply_case_in_detection(
                 );
             }
         }
+        Detection::Conditional { named, .. } => {
+            for sub in named.values_mut() {
+                apply_case_in_detection(
+                    sub,
+                    state,
+                    detection_conditions,
+                    field_name_conditions,
+                    field_name_cond_not,
+                    case_type,
+                );
+            }
+        }
         Detection::Keywords(values) => {
             for val in values.iter_mut() {
                 apply_case_to_value(val, case_type);
@@ -1255,6 +1350,9 @@ fn detection_has_matching_item(
         }
         Detection::And(subs) => subs
             .iter()
+            .any(|sub| detection_has_matching_item(sub, state, conditions)),
+        Detection::Conditional { named, .. } => named
+            .values()
             .any(|sub| detection_has_matching_item(sub, state, conditions)),
         Detection::Keywords(_) => false,
     }

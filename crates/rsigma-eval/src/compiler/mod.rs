@@ -88,6 +88,14 @@ pub enum CompiledDetection {
     /// AND of heterogeneous sub-detections (a mapping mixing plain items with
     /// array object-scope blocks).
     And(Vec<CompiledDetection>),
+    /// Extended array object-scope body: named element-scoped sub-selections
+    /// combined by `condition` (and/or/not), evaluated against a single array
+    /// member. Appears only as an [`ArrayMatch`](CompiledDetection::ArrayMatch)
+    /// body.
+    Conditional {
+        named: HashMap<String, CompiledDetection>,
+        condition: ConditionExpr,
+    },
 }
 
 /// A compiled detection item: a field + matcher.
@@ -397,6 +405,21 @@ pub fn compile_detection(detection: &Detection) -> Result<CompiledDetection> {
             }
             let compiled: Result<Vec<_>> = dets.iter().map(compile_detection).collect();
             Ok(CompiledDetection::And(compiled?))
+        }
+        Detection::Conditional { named, condition } => {
+            if named.is_empty() {
+                return Err(EvalError::InvalidModifiers(
+                    "Conditional detection must have at least one named sub-selection".into(),
+                ));
+            }
+            let compiled: Result<HashMap<String, CompiledDetection>> = named
+                .iter()
+                .map(|(k, d)| Ok((k.clone(), compile_detection(d)?)))
+                .collect();
+            Ok(CompiledDetection::Conditional {
+                named: compiled?,
+                condition: condition.clone(),
+            })
         }
         Detection::Keywords(values) => {
             let ci = true; // keywords are case-insensitive by default
@@ -907,6 +930,12 @@ where
         CompiledDetection::And(dets) => dets
             .iter()
             .all(|d| eval_detection_with_bloom(d, event, bloom)),
+        // Only produced as an `ArrayMatch` body (evaluated via
+        // `eval_array_condition`). At the top level it degenerates to a
+        // sub-rule over the event, which reuses the condition evaluator.
+        CompiledDetection::Conditional { named, condition } => {
+            eval_condition_with_bloom(condition, named, event, &mut Vec::new(), bloom)
+        }
     }
 }
 
@@ -970,6 +999,62 @@ fn eval_array_body<E: Event>(body: &CompiledDetection, member: &EventValue, oute
         },
         // Keywords inside an element scope match the member value directly.
         CompiledDetection::Keywords(matcher) => matcher.matches(member, outer),
+        // Extended block body: evaluate the condition over named sub-selections
+        // against this member (same-element binding under and/or/not).
+        CompiledDetection::Conditional { named, condition } => {
+            eval_array_condition(condition, named, member, outer)
+        }
+    }
+}
+
+/// Evaluate an extended block-body `condition` against a single array member.
+///
+/// Each named sub-selection is evaluated against the member (via
+/// [`eval_array_body`]), and the boolean structure (`and`/`or`/`not` and
+/// selector quantifiers like `1 of x_*`) is applied. This is the element-scoped
+/// analogue of [`eval_condition_with_bloom`]; it carries no bloom because array
+/// members are not bloom-indexed.
+fn eval_array_condition<E: Event>(
+    expr: &ConditionExpr,
+    named: &HashMap<String, CompiledDetection>,
+    member: &EventValue,
+    outer: &E,
+) -> bool {
+    match expr {
+        ConditionExpr::Identifier(name) => named
+            .get(name)
+            .is_some_and(|d| eval_array_body(d, member, outer)),
+        ConditionExpr::And(exprs) => exprs
+            .iter()
+            .all(|e| eval_array_condition(e, named, member, outer)),
+        ConditionExpr::Or(exprs) => exprs
+            .iter()
+            .any(|e| eval_array_condition(e, named, member, outer)),
+        ConditionExpr::Not(inner) => !eval_array_condition(inner, named, member, outer),
+        ConditionExpr::Selector {
+            quantifier,
+            pattern,
+        } => {
+            let names: Vec<&String> = match pattern {
+                SelectorPattern::Them => named.keys().filter(|n| !n.starts_with('_')).collect(),
+                SelectorPattern::Pattern(pat) => {
+                    named.keys().filter(|n| pattern_matches(pat, n)).collect()
+                }
+            };
+            let count = names
+                .iter()
+                .filter(|n| {
+                    named
+                        .get(**n)
+                        .is_some_and(|d| eval_array_body(d, member, outer))
+                })
+                .count() as u64;
+            match quantifier {
+                Quantifier::Any => count >= 1,
+                Quantifier::All => count == names.len() as u64,
+                Quantifier::Count(n) => count >= *n,
+            }
+        }
     }
 }
 
@@ -1173,5 +1258,8 @@ fn collect_detection_fields(
             }
         }
         CompiledDetection::Keywords(_) => {}
+        // Only appears as an array body, whose member fields are not meaningful
+        // top-level field paths (the container is reported by `ArrayMatch`).
+        CompiledDetection::Conditional { .. } => {}
     }
 }

@@ -358,7 +358,7 @@ fn build_block_body(
         // The quantifier was on the final path segment.
         match value {
             // `field[any]: { sub-map }` → object-scope block over member fields.
-            Value::Mapping(_) => {
+            Value::Mapping(m) => {
                 if modifier_part.is_some() {
                     return Err(SigmaParserError::InvalidFieldSpec(
                         "value modifiers cannot be applied to an array object-scope block; \
@@ -366,7 +366,14 @@ fn build_block_body(
                             .into(),
                     ));
                 }
-                parse_detection(value)
+                // A `condition:` key opens the extended (nested-detection) body:
+                // named element-scoped sub-selections combined with and/or/not.
+                // Without it, the body is the basic conjunction map.
+                if m.iter().any(|(k, _)| k.as_str() == Some("condition")) {
+                    parse_extended_block_body(value)
+                } else {
+                    parse_detection(value)
+                }
             }
             // `field[all]: value` (or a list) → match the array member itself.
             // Represented as a body item with no field name.
@@ -393,6 +400,61 @@ fn build_block_body(
             ParsedEntry::Item(item) => Ok(Detection::AllOf(vec![item])),
             ParsedEntry::Block(block) => Ok(block),
         }
+    }
+}
+
+/// Parse the **extended** object-scope block body: named element-scoped
+/// sub-selections plus a `condition:` combining them with `and`/`or`/`not`,
+/// evaluated against a single array member (the recursive "mini-event" form).
+fn parse_extended_block_body(value: &Value) -> Result<Detection> {
+    let m = value.as_mapping().ok_or_else(|| {
+        SigmaParserError::InvalidDetection("extended array block body must be a mapping".into())
+    })?;
+    let mut named: HashMap<String, Detection> = HashMap::new();
+    let mut condition: Option<ConditionExpr> = None;
+    for (k, v) in m.iter() {
+        let key = k.as_str().ok_or_else(|| {
+            SigmaParserError::InvalidDetection("non-string key in array block body".into())
+        })?;
+        if key == "condition" {
+            condition = Some(parse_block_condition(v)?);
+        } else {
+            named.insert(key.to_string(), parse_detection(v)?);
+        }
+    }
+    let condition = condition.ok_or_else(|| {
+        SigmaParserError::InvalidDetection("extended array block requires a 'condition'".into())
+    })?;
+    if named.is_empty() {
+        return Err(SigmaParserError::InvalidDetection(
+            "extended array block has a 'condition' but no named sub-selections".into(),
+        ));
+    }
+    Ok(Detection::Conditional { named, condition })
+}
+
+/// Parse the `condition:` value inside an extended array block: a single
+/// expression string, or a list of strings combined with OR.
+fn parse_block_condition(value: &Value) -> Result<ConditionExpr> {
+    match value {
+        Value::String(s) => parse_condition(s),
+        Value::Sequence(seq) => {
+            let exprs = seq
+                .iter()
+                .map(|x| {
+                    let s = x.as_str().ok_or_else(|| {
+                        SigmaParserError::InvalidDetection(
+                            "array block 'condition' list items must be strings".into(),
+                        )
+                    })?;
+                    parse_condition(s)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(ConditionExpr::Or(exprs))
+        }
+        _ => Err(SigmaParserError::InvalidDetection(
+            "array block 'condition' must be a string or list of strings".into(),
+        )),
     }
 }
 

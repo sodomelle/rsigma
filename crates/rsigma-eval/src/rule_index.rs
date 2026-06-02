@@ -178,6 +178,8 @@ fn extract_exact_pairs(detection: &CompiledDetection) -> Vec<(String, String)> {
         // top-level fields, so they yield no top-level exact pairs. A rule
         // with only array matching falls back to the always-evaluated set.
         CompiledDetection::ArrayMatch { .. } => {}
+        // Extended array body: member-scoped, no top-level exact pairs.
+        CompiledDetection::Conditional { .. } => {}
         CompiledDetection::Keywords(_) => {}
     }
     pairs
