@@ -93,6 +93,26 @@ A scalar value directly under a quantifier matches the member itself:
 tags[all]|startswith: '123.'   # every member of the tags array starts with "123."
 ```
 
+### Basic and extended block bodies
+
+The block body shown above is the **basic** form: a map of predicates, ANDed together and evaluated against one element. It covers the common case and is the simplest to convert.
+
+When you need boolean logic beyond a conjunction (disjunction, or per-element negation), use the **extended** form: a full nested detection with named element-scoped sub-selections and its own `condition:`. A `condition:` key in the block body switches it to the extended form.
+
+```yaml
+detection:
+    selection:
+        connections[any]:                 # any connection in the CIDR that is NOT TCP
+            condition: in_cidr and not is_tcp
+            in_cidr:
+                ip|cidr: '123.1.0.0/16'
+            is_tcp:
+                protocol: 'TCP'
+    condition: selection
+```
+
+Each array element is treated as a mini-event, so the usual Sigma condition grammar (`and`, `or`, `not`, `1 of x_*`) applies per element, with every predicate bound to the same element. The basic form is exactly the extended form with an implicit `condition:` that ANDs its items. The two mirror Sigma's basic and extended correlation conditions and both are valid; an engine may implement only the basic form.
+
 ### Pitfall: flattened correlation does not bind to one element
 
 It is tempting to write correlation as two sibling keys sharing a prefix:
@@ -104,7 +124,7 @@ selection:
     connections[any].ip: '123.1.1.1'
 ```
 
-Each key opens its own independent scope, so this matches an event with a TCP connection **and** a (possibly different) connection to 123.1.1.1. The linter flags this as [`flattened_array_correlation`](../reference/lint-rules.md). Use the object-scope block above to correlate on one element.
+Each key opens its own independent scope, so this matches an event with a TCP connection **and** a (possibly different) connection to 123.1.1.1. The linter flags this as [`flattened_array_correlation`](../reference/lint-rules.md). Use the object-scope block above to correlate on one element, and the extended block body when the correlation needs `or`/`not` (for example "the same connection is in the CIDR and *not* TCP", which the basic conjunction map cannot express).
 
 ## Positional indexing: `field[N]`
 
@@ -154,6 +174,7 @@ rsigma's evaluator (`rsigma engine eval` / `engine daemon`) implements all three
 | Implicit any-member | Yes | Yes (`->>` path access) | Backend-dependent (native on Splunk/KQL multivalue fields) |
 | `[any]` / `[all]` block | Yes | Yes (`jsonb_array_elements` + `EXISTS` / `NOT EXISTS`, JSONB mode) | Unsupported (`UnsupportedArrayMatching`) |
 | `[all_or_empty]` / `[none]` block | Yes | Yes (`CASE`-guarded `NOT EXISTS` so empty/missing matches, JSONB mode) | Unsupported (`UnsupportedArrayMatching`) |
+| Extended block body (`condition:` + named sub-selections) | Yes | Yes (same primitive as the basic block, with a boolean inner predicate `OR` / `NOT`) | Unsupported (`UnsupportedArrayMatching`) |
 | Positional `[N]`, including `[-N]` | Yes | Yes (`->n` / `->>n`, negative subscripts on PG 11+, JSONB mode) | Unsupported (loud error) until backend-specific lowering lands |
 
 PostgreSQL array matching requires JSONB-backed events (set `json_field`); in flat-column mode there is no array to unnest. The object-scope block and positional indexing both report `UnsupportedArrayMatching` on backends that cannot express them (LynxDB and other text backends today, and PostgreSQL flat-column mode), rather than emitting a query that diverges from the evaluator. A backend advertises positional-index support through `Backend::supports_field_index`. Note that Elasticsearch-style backends cannot express positional indexing at all because Lucene arrays are unordered sets; this is exactly why rsigma evaluates the index directly rather than relying on `any`.

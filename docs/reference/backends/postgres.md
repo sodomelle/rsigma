@@ -170,7 +170,19 @@ data->'args'->>-1
   ELSE data->'containers' IS NULL OR jsonb_typeof(data->'containers') = 'null' END)
 ```
 
-`[all_or_empty]` uses the same shape with `WHERE NOT (...)`. Array matching requires JSONB mode; in flat-column mode the backend reports `UnsupportedArrayMatching`.
+`[all_or_empty]` uses the same shape with `WHERE NOT (...)`.
+
+An **extended** block body (a `condition:` plus named element-scoped sub-selections) lowers to the same primitive, with the condition compiled into the inner predicate as a boolean expression over the element (`OR`, and a parenthesized `NOT`):
+
+```sql
+-- connections[any]: { condition: in_cidr and not is_tcp, in_cidr: {ip|cidr: ...}, is_tcp: {protocol: TCP} }
+(jsonb_typeof(data->'connections') = 'array' AND EXISTS (
+  SELECT 1 FROM jsonb_array_elements(data->'connections') AS __sigma_e0
+  WHERE (__sigma_e0->>'ip')::inet <<= '123.1.0.0/16'::cidr
+    AND NOT (__sigma_e0->>'protocol' = 'TCP')))
+```
+
+Array matching requires JSONB mode; in flat-column mode the backend reports `UnsupportedArrayMatching`.
 
 ## Correlation rules
 
