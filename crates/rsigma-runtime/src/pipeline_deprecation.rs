@@ -41,24 +41,6 @@ use std::sync::{Mutex, OnceLock};
 /// [`RuntimeEngine::load_rules`]: crate::RuntimeEngine::load_rules
 static SEEN_INLINE_SOURCES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
-/// Lock a mutex, recovering the guarded value if a previous holder panicked.
-///
-/// The dedup set is process-wide, so a panicking unit test (e.g. a failed
-/// assertion while holding the lock) must not poison the mutex for unrelated
-/// callers and cascade into spurious failures elsewhere in the test binary.
-fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Canonicalise `path` and record it in `seen`. Returns `true` if the path was
-/// newly inserted (the caller should emit the warning), `false` if it had
-/// already been seen. Factored out so the dedup behaviour can be unit-tested
-/// against a local set without touching the process-wide state.
-fn mark_inline_source_seen(seen: &Mutex<HashSet<PathBuf>>, path: &Path) -> bool {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    lock_recover(seen).insert(canonical)
-}
-
 /// Surface the pipeline-embedded `sources:` deprecation notice for one
 /// pipeline file. Idempotent per canonical path (see [`SEEN_INLINE_SOURCES`]).
 ///
@@ -77,10 +59,13 @@ fn mark_inline_source_seen(seen: &Mutex<HashSet<PathBuf>>, path: &Path) -> bool 
 /// - Phase 4 ([#137](https://github.com/timescale/rsigma/issues/137)):
 ///   hard parse error at v1.0; this helper is removed.
 pub fn warn_pipeline_inline_sources(path: &Path, pipeline_name: &str) {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let seen = SEEN_INLINE_SOURCES.get_or_init(|| Mutex::new(HashSet::new()));
-    if !mark_inline_source_seen(seen, path) {
+    let mut guard = seen.lock().expect("inline-sources warn mutex poisoned");
+    if !guard.insert(canonical) {
         return;
     }
+    drop(guard);
 
     tracing::warn!(
         pipeline = %pipeline_name,
@@ -107,7 +92,9 @@ pub fn warn_pipeline_inline_sources(path: &Path, pipeline_name: &str) {
 #[doc(hidden)]
 pub fn reset_inline_sources_dedup_for_tests() {
     if let Some(seen) = SEEN_INLINE_SOURCES.get() {
-        lock_recover(seen).clear();
+        seen.lock()
+            .expect("inline-sources warn mutex poisoned")
+            .clear();
     }
 }
 
@@ -118,49 +105,58 @@ pub fn reset_inline_sources_dedup_for_tests() {
 pub fn tests_only_snapshot() -> HashSet<PathBuf> {
     SEEN_INLINE_SOURCES
         .get()
-        .map(|m| lock_recover(m).clone())
+        .map(|m| {
+            m.lock()
+                .expect("inline-sources warn mutex poisoned")
+                .clone()
+        })
         .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
-    // These tests exercise the dedup primitive against a local set, not the
-    // process-wide `SEEN_INLINE_SOURCES`. That keeps them deterministic and
-    // free of cross-test contention: cargo runs the binary's tests in parallel
-    // threads, and asserting on (or resetting) a shared singleton races with
-    // the runtime-level tests in `engine.rs` and poisons the mutex on failure.
+    /// `SEEN_INLINE_SOURCES` is process-wide, so these tests cannot run
+    /// concurrently: each one resets the set and then asserts on its
+    /// contents, and cargo runs unit tests in parallel by default. This lock
+    /// serialises them. `into_inner` recovers from a poisoned guard left by an
+    /// earlier failing run so one failure does not cascade into the other.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn dedup_suppresses_repeat_warnings_for_same_canonical_path() {
-        let file = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
-        let seen = Mutex::new(HashSet::new());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut file = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
+        writeln!(file, "name: deprecated_pipeline").unwrap();
+        reset_inline_sources_dedup_for_tests();
 
-        assert!(
-            mark_inline_source_seen(&seen, file.path()),
-            "first occurrence should be newly recorded (and warn)"
-        );
-        assert!(
-            !mark_inline_source_seen(&seen, file.path()),
-            "repeat occurrence for the same path should be suppressed"
-        );
+        warn_pipeline_inline_sources(file.path(), "deprecated_pipeline");
+        warn_pipeline_inline_sources(file.path(), "deprecated_pipeline");
 
+        // Snapshot (which drops the global guard) before asserting so a failed
+        // assertion cannot poison `SEEN_INLINE_SOURCES`.
         let canonical = file.path().canonicalize().unwrap();
-        assert!(lock_recover(&seen).contains(&canonical));
+        let seen = tests_only_snapshot();
+        assert!(
+            seen.contains(&canonical),
+            "canonical path should be recorded in dedup set"
+        );
     }
 
     #[test]
     fn dedup_distinguishes_distinct_canonical_paths() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let a = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
         let b = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
-        let seen = Mutex::new(HashSet::new());
+        reset_inline_sources_dedup_for_tests();
 
-        assert!(mark_inline_source_seen(&seen, a.path()));
-        assert!(mark_inline_source_seen(&seen, b.path()));
+        warn_pipeline_inline_sources(a.path(), "a");
+        warn_pipeline_inline_sources(b.path(), "b");
 
-        let guard = lock_recover(&seen);
-        assert!(guard.contains(&a.path().canonicalize().unwrap()));
-        assert!(guard.contains(&b.path().canonicalize().unwrap()));
+        let seen = tests_only_snapshot();
+        assert!(seen.contains(&a.path().canonicalize().unwrap()));
+        assert!(seen.contains(&b.path().canonicalize().unwrap()));
     }
 }
