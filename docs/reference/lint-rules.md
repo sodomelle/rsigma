@@ -126,9 +126,9 @@ Apply to correlation rules (`correlation:` block).
 | `generate_not_boolean` | `error` | — | The `generate:` field is not a boolean. |
 | `invalid_condition_operator` | `error` | — | The condition uses an operator not valid for the correlation type (e.g. `lt` is not valid for `event_count`). |
 
-## Filter rules (7)
+## Filter rules (8)
 
-Apply to filter rules (`kind: filter` with a `filter:` block).
+Apply to filter rules (`kind: filter` with a `filter:` block). One rule (`empty_filter_rules`) is reserved: declared in the enum but not yet emitted by production code.
 
 | Rule | Severity | Fix | Description |
 |------|----------|-----|-------------|
@@ -141,9 +141,9 @@ Apply to filter rules (`kind: filter` with a `filter:` block).
 | `filter_has_status` | `warning` | yes | Filter rules should not carry `status:`. The fix removes the field. |
 | `empty_filter_rules` | reserved | — | Variant declared in the enum and asserted in a regression test, but no production code emits it today. May be repurposed in a future release. |
 
-## Detection-modifier hygiene (5)
+## Modifier and `related:` hygiene (7)
 
-A subset of the detection rules above, grouped here because they all flag modifier misuses on a specific detection item.
+These also apply to detection rules but sit apart from the core detection-block checks above: modifier-misuse checks on a single detection item (`single_value_all_modifier`, `all_with_re`, `incompatible_modifiers`) and validation of the `related:` cross-reference block.
 
 | Rule | Severity | Fix | Description |
 |------|----------|-----|-------------|
