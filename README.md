@@ -31,7 +31,7 @@ For rule quality and editor integration, a built-in linter validates rules again
 * **TLS termination:** Use in-process TLS termination for the daemon API listener (HTTP REST, `/metrics`, OTLP/HTTP, OTLP/gRPC) with optional mutual TLS, `aws-lc-rs` crypto, and cross-platform certificate hot-reload
 * **NATS JetStream:** Use NATS JetStream support with authentication (credentials, mTLS), replay, consumer groups, and dead-letter queues
 * **OTLP ingestion:** Use OTLP support for any OpenTelemetry-compatible agent (Grafana Alloy, Vector, Fluent Bit, OTel Collector) via HTTP or gRPC
-* **Built-in linter:** Validate rules with 67 checks, four severity levels, a full suppression system, and auto-fix (`--fix`) for 13 safe rules
+* **Built-in linter:** Validate rules with 67 checks, four severity levels, a full suppression system, configurable custom tag namespaces (`--tag-namespace`), and auto-fix (`--fix`) for 13 safe rules
 * **LSP server:** Use real-time diagnostics, completions, hover documentation, document symbols, and quick-fix code actions
 * **Docker images:** Use multi-arch Docker images (linux/amd64, linux/arm64) with cosign signatures, SBOM, and SLSA Build L3 provenance
 * **Release binaries:** Use cross-platform binaries for Linux, macOS, and Windows on amd64 and arm64
@@ -396,6 +396,8 @@ The daemon emits Prometheus metrics on `/metrics` and structured JSON logs to st
 
 ## Architecture
 
+![rsigma streaming detection architecture](assets/architecture.svg)
+
 Everything starts with a Sigma rule in YAML format:
 
 - **Parsing:** `yaml_serde` deserializes the YAML into a raw value, then `rsigma-parser` turns it into a strongly-typed AST. A PEG grammar (`sigma.pest`) handles the document structure while a Pratt parser (`condition.rs`) handles condition expressions. Supporting modules define value types (`value.rs`: `SigmaStr`, wildcards, timespans) and AST nodes (`ast.rs`: modifiers, enums). The result is a `SigmaRule`, `CorrelationRule`, `FilterRule`, or `SigmaCollection`.
@@ -553,7 +555,11 @@ Feature-gated items are marked with \* in the diagram.
 
 </details>
 
-A [Mermaid version](assets/architecture.mmd) of this diagram is also available.
+The crate-level view, with every module and all four execution shapes, is rendered separately:
+
+![rsigma internal architecture](assets/internal_architecture.svg)
+
+A [Mermaid version](assets/architecture.mmd) of this diagram is also available. The rendered diagrams above are `assets/architecture.svg` and `assets/internal_architecture.svg`.
 
 ## Performance
 
