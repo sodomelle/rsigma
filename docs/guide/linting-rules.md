@@ -1,6 +1,6 @@
 # Linting Rules
 
-`rsigma rule lint` runs 66 built-in lint rules derived from the Sigma v2.1.0 specification against your rule files. The linter reads each YAML rule, runs it through a pipeline of checks, and reports findings with severity, location, and an optional auto-fix. Use the linter both locally (before commit) and in CI (as a gate on PRs).
+`rsigma rule lint` runs 67 built-in lint rules derived from the Sigma v2.1.0 specification against your rule files. The linter reads each YAML rule, runs it through a pipeline of checks, and reports findings with severity, location, and an optional auto-fix. Use the linter both locally (before commit) and in CI (as a gate on PRs).
 
 This page covers the four severity levels, the suppression system, auto-fix behaviour, JSON schema validation, and the CI integration patterns we recommend.
 
@@ -53,7 +53,7 @@ rsigma rule lint rules/ --fail-level info     # exit 1 on any finding
 
 In CI we recommend `--fail-level warning` for shared rule repositories and `--fail-level info` for SigmaHQ-style contributions where stricter hygiene matters.
 
-## The 66 rules at a glance
+## The 67 rules at a glance
 
 The lint rules are grouped by what part of a rule they inspect:
 
@@ -61,7 +61,7 @@ The lint rules are grouped by what part of a rule they inspect:
 |----------|------:|----------|
 | Infrastructure | 4 | `yaml_parse_error`, `not_a_mapping`, `file_read_error`, `schema_violation` |
 | Shared metadata | 16 | `missing_title`, `invalid_status`, `invalid_level`, `invalid_date`, `non_lowercase_key` |
-| Detection rules | 18 | `missing_detection`, `missing_condition`, `invalid_tag`, `duplicate_fields`, `deprecated_aggregation_syntax` |
+| Detection rules | 19 | `missing_detection`, `missing_condition`, `invalid_tag`, `duplicate_fields`, `deprecated_aggregation_syntax`, `flattened_array_correlation` |
 | Correlation rules | 13 | `missing_correlation_type`, `missing_correlation_timespan`, `invalid_correlation_type`, `missing_condition_field` |
 | Filter rules | 8 | `missing_filter_rules`, `missing_filter_selection`, `filter_has_level` |
 | Detection logic | 7 | `single_value_all_modifier`, `incompatible_modifiers`, `wildcard_only_value` |
@@ -70,7 +70,7 @@ See the full catalog in [Lint Rules reference](../reference/lint-rules.md), with
 
 ## Auto-fix with `--fix`
 
-Thirteen of the 66 rules carry safe auto-fixes (no semantic change). Apply them in place with `--fix`:
+Thirteen of the 67 rules carry safe auto-fixes (no semantic change). Apply them in place with `--fix`:
 
 ```bash
 rsigma rule lint rules/ --fix

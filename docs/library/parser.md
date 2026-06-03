@@ -67,7 +67,7 @@ assert_eq!(collection.rules[0].title.as_deref(), Some("Whoami"));
 
 ## Linting
 
-The linter runs the 66 spec-conformance checks against parsed (or partially parsed) rules and returns `LintWarning`s:
+The linter runs the 67 spec-conformance checks against parsed (or partially parsed) rules and returns `LintWarning`s:
 
 ```rust
 use rsigma_parser::lint::{lint_yaml_directory, LintConfig};
@@ -105,6 +105,6 @@ Bounds: `MAX_CONDITION_LEN = 64 KiB`, `MAX_CONDITION_DEPTH = 64`. See [Security 
 
 - [`rsigma-eval`](eval.md) for the next layer: compile and evaluate.
 - [`rsigma-convert`](convert.md) for generating backend queries from the AST.
-- [Lint Rules reference](../reference/lint-rules.md) for the 66 lint checks the crate ships.
+- [Lint Rules reference](../reference/lint-rules.md) for the 67 lint checks the crate ships.
 - [`rsigma-parser` README](https://github.com/timescale/rsigma/blob/main/crates/rsigma-parser/README.md) for the full AST reference and modifier matrix.
 - [docs.rs/rsigma-parser](https://docs.rs/rsigma-parser) for the generated API documentation.

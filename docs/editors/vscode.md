@@ -1,6 +1,6 @@
 # VS Code and Cursor
 
-The `rsigma` VS Code extension wraps [`rsigma-lsp`](https://github.com/timescale/rsigma/tree/main/crates/rsigma-lsp) and lights up `.yml` files with the same 66 lint rules, parse errors, and compile errors that `rsigma rule lint` and `rsigma rule validate` produce. Because it is a thin client over the language server, anything that lints in CI also lights up in the editor, and vice versa.
+The `rsigma` VS Code extension wraps [`rsigma-lsp`](https://github.com/timescale/rsigma/tree/main/crates/rsigma-lsp) and lights up `.yml` files with the same 67 lint rules, parse errors, and compile errors that `rsigma rule lint` and `rsigma rule validate` produce. Because it is a thin client over the language server, anything that lints in CI also lights up in the editor, and vice versa.
 
 The extension also runs as-is in [Cursor](https://cursor.sh/) and any other VS Code-compatible editor that supports VSIX installation.
 
@@ -8,7 +8,7 @@ The extension also runs as-is in [Cursor](https://cursor.sh/) and any other VS C
 
 | Capability | Detail |
 |------------|--------|
-| Diagnostics | All 66 lint rules, plus YAML and condition-expression parse errors, plus per-rule compile errors. Three layers run on every save and after a 150 ms debounce on every change. |
+| Diagnostics | All 67 lint rules, plus YAML and condition-expression parse errors, plus per-rule compile errors. Three layers run on every save and after a 150 ms debounce on every change. |
 | Code actions | One-click quick-fixes for 13 of the lint rules (the `Safe` fix set). Cursor over a squiggle, press `Cmd+.` / `Ctrl+.`, pick the suggestion. |
 | Completions | Modifier names after `|`, MITRE ATT&CK tags inside `tags:`, valid `status` / `level` / `product` / `category` / `service` values, top-level keys, selection names referenced from `condition:`. |
 | Hover | Modifier documentation, MITRE ATT&CK tactic and technique descriptions (with link-out to attack.mitre.org). |

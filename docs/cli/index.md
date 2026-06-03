@@ -34,7 +34,7 @@ rsigma
 ├── rule
 │   ├── parse                  parse a single rule file, dump AST as JSON
 │   ├── validate               parse + compile a directory of rules
-│   ├── lint                   run the 66 lint checks
+│   ├── lint                   run the 67 lint checks
 │   ├── fields                 list every field referenced by the rules
 │   ├── condition              parse a condition expression, dump AST
 │   └── stdin                  parse a rule from stdin

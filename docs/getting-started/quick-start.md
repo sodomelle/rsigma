@@ -106,7 +106,7 @@ Stderr closes with a `Processed 3 events, 2 matches.` summary.
 
 ## 4. Lint and validate the rule
 
-`rule lint` checks the rule against 66 Sigma spec checks. By default, only a summary line is printed:
+`rule lint` checks the rule against 67 Sigma spec checks. By default, only a summary line is printed:
 
 ```bash
 rsigma rule lint rules/
@@ -148,7 +148,7 @@ Parsed 1 documents from rules/
   Compile errors:    0
 ```
 
-Both commands return [structured exit codes](../reference/exit-codes.md) so they slot into CI without parsing stdout. `lint --fix` will apply safe auto-fixes for 13 of the 66 rules.
+Both commands return [structured exit codes](../reference/exit-codes.md) so they slot into CI without parsing stdout. `lint --fix` will apply safe auto-fixes for 13 of the 67 rules.
 
 ## 5. Run as a streaming daemon
 
