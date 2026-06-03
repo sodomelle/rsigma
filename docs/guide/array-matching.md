@@ -113,6 +113,25 @@ detection:
 
 Each array element is treated as a mini-event, so the usual Sigma condition grammar (`and`, `or`, `not`, `1 of x_*`) applies per element, with every predicate bound to the same element. The basic form is exactly the extended form with an implicit `condition:` that ANDs its items. The two mirror Sigma's basic and extended correlation conditions and both are valid; an engine may implement only the basic form.
 
+### Arrays of scalars: the `.` element reference
+
+A block body attaches predicates to inner field names, which works for arrays of objects. For an array of **scalars** there is no inner field, so a standalone `.` references the current element itself, optionally with modifiers (`.|gte`, `.|cidr`). It generalizes the field-less shorthand (`tags[all]: value`) to multiple, named, or negated predicates. For example, "any 5xx response code that is not 504":
+
+```yaml
+detection:
+    selection:
+        rcodes[any]:
+            condition: server_error and not gateway_timeout
+            server_error:
+                .|gte: 500
+                .|lte: 599
+            gateway_timeout:
+                .: 504
+    condition: selection
+```
+
+`.` denotes only the standalone element; an object element's fields are still referenced by name, so there is no `.foo` mid-path form.
+
 ### Pitfall: flattened correlation does not bind to one element
 
 It is tempting to write correlation as two sibling keys sharing a prefix:
@@ -152,6 +171,16 @@ args[-1]: '-enc'                # the last argument, regardless of vector length
 ```
 
 Because the position is fixed, sibling keys under the same index correlate correctly (unlike `[any]`/`[all]`): `connections[0].protocol` and `connections[0].ip` both bind to element 0.
+
+### Escaping literal brackets
+
+Only an unescaped trailing `[...]` is a selector. To match a field whose name literally contains brackets, escape them as `\[` and `\]`, the same way `\*` and `\?` escape value wildcards:
+
+```yaml
+args\[0\]: 'cmd.exe'   # a field literally named "args[0]", not index 0
+```
+
+The evaluator resolves the escaped name to the literal field. Backends that cannot express a literal-bracket field name error rather than emit a divergent query.
 
 ## `[all]` is not the `all` modifier
 
