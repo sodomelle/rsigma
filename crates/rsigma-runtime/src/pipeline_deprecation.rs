@@ -118,8 +118,16 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// `SEEN_INLINE_SOURCES` is process-wide, so these tests cannot run
+    /// concurrently: each one resets the set and then asserts on its
+    /// contents, and cargo runs unit tests in parallel by default. This lock
+    /// serialises them. `into_inner` recovers from a poisoned guard left by an
+    /// earlier failing run so one failure does not cascade into the other.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn dedup_suppresses_repeat_warnings_for_same_canonical_path() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut file = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
         writeln!(file, "name: deprecated_pipeline").unwrap();
         reset_inline_sources_dedup_for_tests();
@@ -127,8 +135,10 @@ mod tests {
         warn_pipeline_inline_sources(file.path(), "deprecated_pipeline");
         warn_pipeline_inline_sources(file.path(), "deprecated_pipeline");
 
+        // Snapshot (which drops the global guard) before asserting so a failed
+        // assertion cannot poison `SEEN_INLINE_SOURCES`.
         let canonical = file.path().canonicalize().unwrap();
-        let seen = SEEN_INLINE_SOURCES.get().unwrap().lock().unwrap();
+        let seen = tests_only_snapshot();
         assert!(
             seen.contains(&canonical),
             "canonical path should be recorded in dedup set"
@@ -137,6 +147,7 @@ mod tests {
 
     #[test]
     fn dedup_distinguishes_distinct_canonical_paths() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let a = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
         let b = tempfile::Builder::new().suffix(".yml").tempfile().unwrap();
         reset_inline_sources_dedup_for_tests();
@@ -144,7 +155,7 @@ mod tests {
         warn_pipeline_inline_sources(a.path(), "a");
         warn_pipeline_inline_sources(b.path(), "b");
 
-        let seen = SEEN_INLINE_SOURCES.get().unwrap().lock().unwrap();
+        let seen = tests_only_snapshot();
         assert!(seen.contains(&a.path().canonicalize().unwrap()));
         assert!(seen.contains(&b.path().canonicalize().unwrap()));
     }
