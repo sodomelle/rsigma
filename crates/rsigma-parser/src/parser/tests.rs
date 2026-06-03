@@ -1487,6 +1487,22 @@ fn array_extended_block_requires_named_selections() {
 }
 
 #[test]
+fn array_scalar_element_marker_is_field_less() {
+    // `.` inside a block body lowers to a field-less item (matches the member).
+    let det =
+        parse_selection("    selection:\n        tags[any]:\n            .|contains: \"admin\"\n");
+    let Detection::ArrayMatch { body, .. } = det else {
+        panic!("expected ArrayMatch, got {det:?}");
+    };
+    let Detection::AllOf(items) = *body else {
+        panic!("expected AllOf body");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].field.name, None);
+    assert_eq!(items[0].field.modifiers, vec![Modifier::Contains]);
+}
+
+#[test]
 fn array_object_scope_block_all_or_empty() {
     let det = parse_selection(
         "    selection:\n        connections[all_or_empty]:\n            protocol: \"TCP\"\n",

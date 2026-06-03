@@ -585,7 +585,12 @@ pub fn parse_field_spec(key: &str) -> Result<FieldSpec> {
 
     let parts: Vec<&str> = key.split('|').collect();
     let field_name = parts[0];
-    let field = if field_name.is_empty() {
+    // A standalone `.` is the array-element reference inside an object-scope
+    // block body (the current scalar member); it lowers to a field-less item,
+    // which the evaluator matches against the member value itself. Outside a
+    // block body it has no special meaning, but a literal field named `.` is
+    // not a realistic event field, so the mapping is unconditional.
+    let field = if field_name.is_empty() || field_name == "." {
         None
     } else {
         Some(field_name.to_string())

@@ -1929,6 +1929,51 @@ detection:
 }
 
 #[test]
+fn array_extended_block_scalar_element_marker() {
+    // `.` references the current scalar member inside an extended block body:
+    // "any 5xx response code that is not 504".
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        rcodes[any]:
+            condition: server_error and not gateway_timeout
+            server_error:
+                .|gte: 500
+                .|lte: 599
+            gateway_timeout:
+                .: 504
+    condition: selection
+"#,
+    );
+    assert!(matches(&engine, &json!({"rcodes": [502, 504, 200]})));
+    // Only a 504 and a non-5xx -> no element is a 5xx that is not 504.
+    assert!(!matches(&engine, &json!({"rcodes": [504, 200]})));
+    assert!(matches(&engine, &json!({"rcodes": [503]})));
+    assert!(!matches(&engine, &json!({"rcodes": [200, 301]})));
+}
+
+#[test]
+fn array_scalar_element_marker_basic_block() {
+    // `.` in a basic block: every member satisfies the predicate.
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        ports[all]:
+            .|gte: 1024
+    condition: selection
+"#,
+    );
+    assert!(matches(&engine, &json!({"ports": [1080, 8443]})));
+    assert!(!matches(&engine, &json!({"ports": [1080, 80]})));
+}
+
+#[test]
 fn array_scalar_member_none() {
     let engine = make_engine_with_rule(
         r#"
