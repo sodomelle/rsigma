@@ -18,6 +18,7 @@ mod tests;
 #[cfg(test)]
 pub(crate) use optimizer::optimize_any_of as optimize_any_of_for_test;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,6 +26,7 @@ use base64::Engine as Base64Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use regex::Regex;
 
+use rsigma_parser::fieldpath::{first_unescaped, unescape_brackets};
 use rsigma_parser::value::{SpecialChar, StringPart};
 use rsigma_parser::{
     ArrayQuantifier, ConditionExpr, Detection, DetectionItem, Level, LogSource, Modifier,
@@ -1094,25 +1096,27 @@ fn element_field<'a>(member: &'a EventValue<'a>, path: &str) -> Option<&'a Event
 }
 
 enum EventOp<'a> {
-    Key(&'a str),
+    Key(Cow<'a, str>),
     Index(i64),
 }
 
 /// Parse a dot path into navigation ops, recognizing positional `name[N]`.
+/// Only an unescaped `[...]` is an index; `\[` / `\]` are literal and unescaped
+/// into the key.
 fn parse_event_ops(path: &str) -> Vec<EventOp<'_>> {
     let mut ops = Vec::new();
     for part in path.split('.') {
-        match part.find('[') {
+        match first_unescaped(part, b'[') {
             Some(bpos) if index_groups(&part[bpos..]).is_some() => {
                 let name = &part[..bpos];
                 if !name.is_empty() {
-                    ops.push(EventOp::Key(name));
+                    ops.push(EventOp::Key(unescape_brackets(name)));
                 }
                 for idx in index_groups(&part[bpos..]).expect("checked") {
                     ops.push(EventOp::Index(idx));
                 }
             }
-            _ => ops.push(EventOp::Key(part)),
+            _ => ops.push(EventOp::Key(unescape_brackets(part))),
         }
     }
     ops
@@ -1144,7 +1148,7 @@ fn nav_event_value<'a>(
             EventValue::Map(entries) => {
                 let next = entries
                     .iter()
-                    .find(|(k, _)| k.as_ref() == *key)
+                    .find(|(k, _)| k.as_ref() == key.as_ref())
                     .map(|(_, v)| v)?;
                 nav_event_value(next, rest)
             }

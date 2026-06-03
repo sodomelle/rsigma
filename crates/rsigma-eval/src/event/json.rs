@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use rsigma_parser::fieldpath::{first_unescaped, unescape_brackets};
 use serde_json::Value;
 
 use super::{Event, EventValue};
@@ -65,7 +66,7 @@ impl<'a> Event for JsonEvent<'a> {
             return Some(EventValue::from(v));
         }
 
-        if path.contains('.') || path.contains('[') {
+        if path.contains('.') || path.contains('[') || path.contains('\\') {
             let ops = parse_path_ops(path);
             let mut collected: Vec<EventValue<'_>> = Vec::new();
             collect_by_ops(value, &ops, &mut collected);
@@ -121,8 +122,9 @@ impl<'a> Event for JsonEvent<'a> {
 
 /// A single field-path navigation step.
 enum PathOp<'a> {
-    /// Object key lookup. Distributes over arrays (implicit any-member).
-    Key(&'a str),
+    /// Object key lookup (bracket-unescaped). Distributes over arrays (implicit
+    /// any-member).
+    Key(Cow<'a, str>),
     /// Positional array index, possibly negative. Selects one element; never
     /// fans out.
     Index(i64),
@@ -147,17 +149,19 @@ pub(crate) fn resolve_array_index(index: i64, len: usize) -> Option<usize> {
 fn parse_path_ops(path: &str) -> Vec<PathOp<'_>> {
     let mut ops = Vec::new();
     for part in path.split('.') {
-        match part.find('[') {
+        match first_unescaped(part, b'[') {
             Some(bpos) if parse_index_groups(&part[bpos..]).is_some() => {
                 let name = &part[..bpos];
                 if !name.is_empty() {
-                    ops.push(PathOp::Key(name));
+                    ops.push(PathOp::Key(unescape_brackets(name)));
                 }
                 for idx in parse_index_groups(&part[bpos..]).expect("checked") {
                     ops.push(PathOp::Index(idx));
                 }
             }
-            _ => ops.push(PathOp::Key(part)),
+            // No unescaped index group: the whole segment is a literal key,
+            // with `\[` / `\]` unescaped to match the event's actual key.
+            _ => ops.push(PathOp::Key(unescape_brackets(part))),
         }
     }
     ops
@@ -193,7 +197,7 @@ fn collect_by_ops<'a>(current: &'a Value, ops: &[PathOp<'_>], out: &mut Vec<Even
     match op {
         PathOp::Key(key) => match current {
             Value::Object(map) => {
-                if let Some(next) = map.get(*key) {
+                if let Some(next) = map.get(key.as_ref()) {
                     collect_by_ops(next, rest, out);
                 }
             }

@@ -55,6 +55,7 @@
 pub mod ast;
 pub mod condition;
 pub mod error;
+pub mod fieldpath;
 pub mod lint;
 pub mod parser;
 pub mod value;

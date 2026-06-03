@@ -1699,6 +1699,26 @@ detection:
 }
 
 #[test]
+fn array_escaped_brackets_match_literal_field() {
+    // `args\[0\]` matches a field literally named "args[0]", not index 0 of an
+    // `args` array.
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        args\[0\]: 'cmd.exe'
+    condition: selection
+"#,
+    );
+    // Literal field present -> match.
+    assert!(matches(&engine, &json!({"args[0]": "cmd.exe"})));
+    // An `args` array does NOT satisfy the escaped (literal) field.
+    assert!(!matches(&engine, &json!({"args": ["cmd.exe", "x"]})));
+}
+
+#[test]
 fn array_negative_index_counts_from_end() {
     let engine = make_engine_with_rule(
         r#"

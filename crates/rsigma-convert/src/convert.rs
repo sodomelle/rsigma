@@ -139,10 +139,12 @@ pub fn convert_collection(
 /// so a bracketed integer is the positional-index signal.
 fn field_has_positional_index(field: &str) -> bool {
     field.split('.').any(|seg| {
-        let Some(open) = seg.find('[') else {
+        // Only an unescaped trailing `[...]` is a selector; `\[` / `\]` are a
+        // literal bracket in the field name, not a positional index.
+        let Some(open) = rsigma_parser::fieldpath::first_unescaped(seg, b'[') else {
             return false;
         };
-        if !seg.ends_with(']') {
+        if !rsigma_parser::fieldpath::ends_with_unescaped(seg, b']') {
             return false;
         }
         let inner = &seg[open + 1..seg.len() - 1];
@@ -436,5 +438,23 @@ fn pattern_matches_name(pattern: &str, name: &str) -> bool {
         name.ends_with(suffix)
     } else {
         pattern == name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::field_has_positional_index;
+
+    #[test]
+    fn positional_index_detection_respects_escaping() {
+        assert!(field_has_positional_index("args[0]"));
+        assert!(field_has_positional_index("args[-1]"));
+        assert!(field_has_positional_index("connections[0].ip"));
+        // Escaped brackets are a literal field name, not a positional index.
+        assert!(!field_has_positional_index("args\\[0\\]"));
+        assert!(!field_has_positional_index("weird\\[x\\]"));
+        // Quantifier selectors never reach field names, and plain fields have
+        // no index.
+        assert!(!field_has_positional_index("process.args"));
     }
 }

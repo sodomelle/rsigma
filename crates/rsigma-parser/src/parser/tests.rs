@@ -1677,6 +1677,18 @@ fn array_positional_index_scalar_is_plain_field() {
 }
 
 #[test]
+fn array_escaped_brackets_are_literal_field() {
+    // `args\[0\]` is a literal field name (escaped brackets), not index 0; it
+    // must parse as a plain item, keeping the escape in the stored field name.
+    let det = parse_selection("    selection:\n        args\\[0\\]: \"cmd.exe\"\n");
+    let Detection::AllOf(items) = det else {
+        panic!("expected AllOf, got {det:?}");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].field.name.as_deref(), Some("args\\[0\\]"));
+}
+
+#[test]
 fn array_negative_index_is_plain_field() {
     // `args[-1]: x` keeps the negative index marker in the literal field path.
     let det = parse_selection("    selection:\n        args[-1]: \"-enc\"\n");

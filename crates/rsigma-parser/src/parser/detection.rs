@@ -5,6 +5,7 @@ use yaml_serde::Value;
 use crate::ast::*;
 use crate::condition::parse_condition;
 use crate::error::{Result, SigmaParserError};
+use crate::fieldpath::{ends_with_unescaped, first_unescaped};
 use crate::value::SigmaValue;
 
 use super::{
@@ -487,8 +488,11 @@ fn parse_block_with_prefix(prefix: &str, value: &Value) -> Result<Detection> {
 fn parse_field_path(field_part: &str) -> Result<Vec<PathSegment>> {
     let mut segments = Vec::new();
     for raw in field_part.split('.') {
-        if raw.ends_with(']')
-            && let Some(open) = raw.find('[')
+        // Only an unescaped trailing `[...]` is a selector. An escaped bracket
+        // (`\[` / `\]`) is a literal part of the field name and leaves the
+        // segment plain; it is unescaped when the field is resolved.
+        if let Some(open) = first_unescaped(raw, b'[')
+            && ends_with_unescaped(raw, b']')
         {
             let name = &raw[..open];
             let token = &raw[open + 1..raw.len() - 1];
@@ -508,7 +512,8 @@ fn parse_field_path(field_part: &str) -> Result<Vec<PathSegment>> {
                         return Err(SigmaParserError::InvalidFieldSpec(format!(
                             "unknown array selector '[{token}]' in field '{field_part}'; \
                              only [any], [all], [all_or_empty], [none], and an integer index \
-                             [N] (negative counts from the end) are supported"
+                             [N] (negative counts from the end) are supported; \
+                             escape a literal bracket as \\[ or \\]"
                         )));
                     }
                 },
