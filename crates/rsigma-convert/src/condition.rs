@@ -46,15 +46,10 @@ pub fn convert_condition_expr(
             quantifier,
             pattern,
         } => {
-            let names: Vec<&String> = match pattern {
-                SelectorPattern::Them => {
-                    detections.keys().filter(|n| !n.starts_with('_')).collect()
-                }
-                SelectorPattern::Pattern(pat) => detections
-                    .keys()
-                    .filter(|n| pattern_matches(pat, n))
-                    .collect(),
-            };
+            let names: Vec<&String> = detections
+                .keys()
+                .filter(|n| pattern.matches_detection_name(n))
+                .collect();
 
             if names.is_empty() {
                 return Err(ConvertError::RuleConversion(
@@ -65,7 +60,15 @@ pub fn convert_condition_expr(
             let parts: Vec<String> = names
                 .iter()
                 .map(|name| {
-                    let det = detections.get(*name).unwrap();
+                    // The name came from `detections.keys()` immediately
+                    // above, so this lookup will normally succeed; surface a
+                    // clear error rather than panic if the invariant is ever
+                    // broken (defensive: no unwrap on shared dispatch paths).
+                    let det = detections.get(*name).ok_or_else(|| {
+                        ConvertError::RuleConversion(format!(
+                            "selector matched detection '{name}' but it disappeared before lookup"
+                        ))
+                    })?;
                     backend.convert_detection(det, state)
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -78,57 +81,5 @@ pub fn convert_condition_expr(
                 ))),
             }
         }
-    }
-}
-
-/// Simple wildcard match on detection names (supports `*` glob at end, start, or middle).
-fn pattern_matches(pattern: &str, name: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return name.starts_with(prefix);
-    }
-    if let Some(suffix) = pattern.strip_prefix('*') {
-        return name.ends_with(suffix);
-    }
-    if let Some((prefix, suffix)) = pattern.split_once('*') {
-        return name.starts_with(prefix) && name.ends_with(suffix);
-    }
-    pattern == name
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_pattern_matches_star_suffix() {
-        assert!(pattern_matches("selection_*", "selection_main"));
-        assert!(pattern_matches("selection_*", "selection_"));
-        assert!(!pattern_matches("selection_*", "filter_main"));
-    }
-
-    #[test]
-    fn test_pattern_matches_star_prefix() {
-        assert!(pattern_matches("*_main", "selection_main"));
-        assert!(!pattern_matches("*_main", "selection_alt"));
-    }
-
-    #[test]
-    fn test_pattern_matches_star_middle() {
-        assert!(pattern_matches("sel*main", "selection_main"));
-        assert!(!pattern_matches("sel*main", "filter_main"));
-    }
-
-    #[test]
-    fn test_pattern_matches_exact() {
-        assert!(pattern_matches("selection", "selection"));
-        assert!(!pattern_matches("selection", "filter"));
-    }
-
-    #[test]
-    fn test_pattern_matches_star_only() {
-        assert!(pattern_matches("*", "anything"));
     }
 }

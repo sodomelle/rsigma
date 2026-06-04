@@ -161,7 +161,7 @@ The daemon binds an Axum HTTP server on `--api-addr` (default `0.0.0.0:9090`). I
 |------|--------|---------|
 | `/healthz` | GET | Liveness probe. Always 200 once the listener is up. |
 | `/readyz` | GET | Readiness probe. 200 once rules are loaded, 503 otherwise. |
-| `/metrics` | GET | Prometheus text format, 27 metrics. |
+| `/metrics` | GET | Prometheus text format, 38 metric names under `--all-features` (33 always-present + 3 OTLP + 2 TLS gated on the matching build features). |
 | `/api/v1/status` | GET | Counters, state-entry counts, uptime. |
 | `/api/v1/rules` | GET | Rule counts and rules-directory path. |
 | `/api/v1/reload` | POST | Trigger an immediate rules reload. |
@@ -218,5 +218,5 @@ If the drain timeout expires before the queue empties, the daemon force-exits wi
 - [OTLP Integration](otlp-integration.md) for Alloy, Vector, Fluent Bit, and OTel Collector recipes.
 - [Observability](observability.md) for `--log-format`, RUST_LOG targets, and tracing spans.
 - [HTTP API](../reference/http-api.md) for the full endpoint reference.
-- [Prometheus metrics](../reference/metrics.md) for the 27-metric catalog.
+- [Prometheus metrics](../reference/metrics.md) for the 38-metric catalog.
 - [Docker](../deployment/docker.md) for hardened production containers.

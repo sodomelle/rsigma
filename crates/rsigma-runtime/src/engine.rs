@@ -46,6 +46,7 @@ enum EngineVariant {
 }
 
 /// Summary statistics about the loaded engine state.
+#[derive(Debug, Clone, Copy)]
 pub struct EngineStats {
     pub detection_rules: usize,
     pub correlation_rules: usize,
@@ -94,10 +95,23 @@ impl RuntimeEngine {
         self.bloom_prefilter = enabled;
     }
 
+    /// Return the current bloom pre-filter setting. Used by hot-reload to
+    /// carry tuning across a `RuntimeEngine` swap so a daemon-startup
+    /// `set_bloom_prefilter(true)` does not silently revert on the first
+    /// reload.
+    pub fn bloom_prefilter(&self) -> bool {
+        self.bloom_prefilter
+    }
+
     /// Override the bloom memory budget on the inner detection engine.
     /// Applies on the next `load_rules()`.
     pub fn set_bloom_max_bytes(&mut self, max_bytes: usize) {
         self.bloom_max_bytes = Some(max_bytes);
+    }
+
+    /// Return the configured bloom memory budget, if one was set.
+    pub fn bloom_max_bytes(&self) -> Option<usize> {
+        self.bloom_max_bytes
     }
 
     /// Enable or disable the cross-rule Aho-Corasick pre-filter on the
@@ -109,6 +123,12 @@ impl RuntimeEngine {
     #[cfg(feature = "daachorse-index")]
     pub fn set_cross_rule_ac(&mut self, enabled: bool) {
         self.cross_rule_ac = enabled;
+    }
+
+    /// Return the current cross-rule Aho-Corasick setting.
+    #[cfg(feature = "daachorse-index")]
+    pub fn cross_rule_ac(&self) -> bool {
+        self.cross_rule_ac
     }
 
     /// Set a source resolver for dynamic pipeline sources.
@@ -208,26 +228,37 @@ impl RuntimeEngine {
             self.pipelines = reload_pipelines(&self.pipeline_paths)?;
         }
 
-        // Resolve dynamic sources if a resolver is set
+        // Resolve dynamic sources if a resolver is set.
+        //
+        // Both error cases must fail closed. Loading rules with unresolved
+        // `${source.*}` templates produces rules whose semantics differ
+        // from what the operator wrote; on a hot-reload, the previous
+        // engine is still serving traffic, so returning an error here
+        // keeps it active rather than silently replacing it with a broken
+        // one.
         if self.source_resolver.is_some() && self.pipelines.iter().any(|p| p.is_dynamic()) {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let pipelines = std::mem::take(&mut self.pipelines);
-                let resolver = self.source_resolver.clone().unwrap();
-                let allow_remote = self.allow_remote_include;
-                let resolved = tokio::task::block_in_place(|| {
-                    handle.block_on(async {
-                        resolve_pipelines_async(&resolver, &pipelines, allow_remote).await
-                    })
-                });
-                match resolved {
-                    Ok(p) => self.pipelines = p,
-                    Err(e) => {
-                        self.pipelines = pipelines;
-                        tracing::warn!(error = %e, "Dynamic source resolution failed, using unresolved pipelines");
-                    }
+            let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+                "Dynamic pipelines require a tokio runtime; refusing to load rules with \
+                 unresolved sources"
+                    .to_string()
+            })?;
+            let pipelines = std::mem::take(&mut self.pipelines);
+            let resolver = self.source_resolver.clone().unwrap();
+            let allow_remote = self.allow_remote_include;
+            let resolved = tokio::task::block_in_place(|| {
+                handle.block_on(async {
+                    resolve_pipelines_async(&resolver, &pipelines, allow_remote).await
+                })
+            });
+            match resolved {
+                Ok(p) => self.pipelines = p,
+                Err(e) => {
+                    // Restore the captured pipelines so a higher-level
+                    // retry can re-run the same load against the same
+                    // inputs.
+                    self.pipelines = pipelines;
+                    return Err(format!("Dynamic source resolution failed: {e}"));
                 }
-            } else {
-                tracing::warn!("No tokio runtime available for dynamic source resolution");
             }
         }
 
@@ -453,17 +484,15 @@ async fn resolve_pipelines_async(
 mod tests {
     use super::*;
     use crate::pipeline_deprecation::reset_inline_sources_dedup_for_tests;
-    use std::sync::Mutex;
 
     // The pipeline-embedded `sources:` dedup set is process-wide, so tests
-    // that read it need to serialize. cargo test runs tests in a binary
-    // concurrently; this guard turns those into sequential probes of the
-    // shared set. `serial_guard` recovers a poisoned lock so a failing test
+    // that read it must serialize against every other test that touches it,
+    // including the unit tests in `pipeline_deprecation`. They share one lock
+    // (`DEDUP_TEST_LOCK`) so cargo's parallel test threads don't race on the
+    // global set. `serial_guard` recovers a poisoned lock so a failing test
     // does not cascade into the others.
-    static DEDUP_TEST_GUARD: Mutex<()> = Mutex::new(());
-
     fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
-        DEDUP_TEST_GUARD
+        crate::pipeline_deprecation::DEDUP_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -606,5 +635,60 @@ transformations:
             "second load_rules should not change the dedup set",
         );
         assert!(after.contains(&canonical));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_rules_fails_closed_when_dynamic_source_resolution_fails() {
+        // A dynamic pipeline whose source cannot resolve must surface the
+        // error so callers (LogProcessor::reload_rules in particular) can
+        // keep the previous engine active. The historical behavior logged
+        // a warning and loaded rules with unexpanded `${source.*}`
+        // placeholders, which silently produced detection rules with
+        // different semantics from what the operator wrote.
+        let dir = tempfile::tempdir().unwrap();
+        let rule_path = dir.path().join("rule.yml");
+        std::fs::write(&rule_path, RULE_YAML).unwrap();
+
+        // Pipeline declares a file dynamic source pointing at a path that
+        // does not exist; the resolver returns SourceError on first read.
+        let missing = dir.path().join("missing.json");
+        let pipeline_yaml = format!(
+            r#"
+name: dynamic_missing
+priority: 10
+sources:
+  - id: feed
+    type: file
+    path: {}
+    format: json
+    on_error: fail
+transformations:
+  - type: value_placeholders
+"#,
+            missing.display(),
+        );
+        let pipeline_path = dir.path().join("pipeline.yml");
+        std::fs::write(&pipeline_path, pipeline_yaml).unwrap();
+        let pipeline = parse_pipeline_file(&pipeline_path).unwrap();
+        assert!(
+            pipeline.is_dynamic(),
+            "fixture should produce a dynamic pipeline"
+        );
+
+        let mut engine = RuntimeEngine::new(
+            rule_path,
+            vec![pipeline],
+            CorrelationConfig::default(),
+            false,
+        );
+        engine.set_source_resolver(Arc::new(sources::DefaultSourceResolver::new()));
+
+        let err = engine
+            .load_rules()
+            .expect_err("missing source must cause load_rules to fail closed");
+        assert!(
+            err.contains("Dynamic source resolution failed"),
+            "error should explain the fail-closed path; got: {err}"
+        );
     }
 }

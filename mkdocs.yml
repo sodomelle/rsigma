@@ -167,6 +167,7 @@ plugins:
           - guide/rule-conversion.md
           - guide/linting-rules.md
           - guide/processing-pipelines.md
+          - guide/enrichers.md
           - guide/input-formats.md
           - guide/nats-streaming.md
           - guide/otlp-integration.md
@@ -183,10 +184,17 @@ plugins:
           - cli/rule/fields.md
           - cli/rule/condition.md
           - cli/rule/stdin.md
+          - cli/rule/migrate-sources.md
           - cli/backend/convert.md
           - cli/backend/targets.md
           - cli/backend/formats.md
           - cli/pipeline/resolve.md
+          - cli/config/init.md
+          - cli/config/validate.md
+          - cli/config/show.md
+          - cli/config/schema.md
+          - cli/config/path.md
+          - cli/config/reload.md
         Library:
           - library/index.md
           - library/parser.md
@@ -212,6 +220,8 @@ plugins:
           - reference/custom-attributes.md
           - reference/builtin-pipelines.md
           - reference/dynamic-sources.md
+          - reference/output.md
+          - reference/configuration.md
           - reference/security.md
           - reference/architecture.md
         Deployment:

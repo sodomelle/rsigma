@@ -419,6 +419,137 @@ level: high
     }
 }
 
+#[test]
+fn test_value_count_multi_field_uses_composite_key() {
+    // value_count with `field: [User, SrcIp]` must count distinct (User,
+    // SrcIp) tuples, not silently fall back to the first field. The previous
+    // behavior used `fields.first()` and counted only distinct users, so
+    // three events for the same user from different source IPs would never
+    // fire a `gte: 3` threshold.
+    let yaml = r#"
+title: Failed Login
+id: failed-login-002
+logsource:
+    category: auth
+detection:
+    selection:
+        EventType: failed_login
+    condition: selection
+level: low
+---
+title: Failed Logins From Many User-Sources
+id: corr-vc-002
+correlation:
+    type: value_count
+    rules:
+        - failed-login-002
+    group-by:
+        - Host
+    timespan: 60s
+    condition:
+        field: [User, SrcIp]
+        gte: 3
+level: high
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    let mut engine = CorrelationEngine::new(CorrelationConfig::default());
+    engine.add_collection(&collection).unwrap();
+
+    let ts = 1000i64;
+    // Same user, three distinct source IPs: should fire under the tuple key
+    // but never under the old first-field behavior.
+    let events = [
+        ("alice", "10.0.0.1"),
+        ("alice", "10.0.0.2"),
+        ("alice", "10.0.0.3"),
+    ];
+    let mut fired = false;
+    for (i, (user, ip)) in events.iter().enumerate() {
+        let v = json!({
+            "EventType": "failed_login",
+            "Host": "srv01",
+            "User": user,
+            "SrcIp": ip,
+        });
+        let event = JsonEvent::borrow(&v);
+        let r = engine.process_event_at(&event, ts + i as i64);
+        if r.correlation_count() == 1 {
+            fired = true;
+            assert_eq!(
+                r.correlations()
+                    .next()
+                    .unwrap()
+                    .as_correlation()
+                    .unwrap()
+                    .aggregated_value,
+                3.0
+            );
+        }
+    }
+    assert!(
+        fired,
+        "value_count with multi-field key should fire when 3 distinct (User, SrcIp) tuples are seen"
+    );
+}
+
+#[test]
+fn test_value_count_multi_field_duplicate_tuple_does_not_double_count() {
+    // Same (User, SrcIp) tuple repeated should be counted as one distinct
+    // value, regardless of how many times it appears.
+    let yaml = r#"
+title: Failed Login
+id: failed-login-003
+logsource:
+    category: auth
+detection:
+    selection:
+        EventType: failed_login
+    condition: selection
+level: low
+---
+title: Distinct (User, SrcIp) Threshold
+id: corr-vc-003
+correlation:
+    type: value_count
+    rules:
+        - failed-login-003
+    group-by:
+        - Host
+    timespan: 60s
+    condition:
+        field: [User, SrcIp]
+        gte: 3
+level: high
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    let mut engine = CorrelationEngine::new(CorrelationConfig::default());
+    engine.add_collection(&collection).unwrap();
+
+    let ts = 1000i64;
+    // Two distinct tuples repeated; the threshold of 3 should never trigger.
+    let events = [
+        ("alice", "10.0.0.1"),
+        ("alice", "10.0.0.2"),
+        ("alice", "10.0.0.1"),
+        ("alice", "10.0.0.2"),
+    ];
+    for (i, (user, ip)) in events.iter().enumerate() {
+        let v = json!({
+            "EventType": "failed_login",
+            "Host": "srv01",
+            "User": user,
+            "SrcIp": ip,
+        });
+        let event = JsonEvent::borrow(&v);
+        let r = engine.process_event_at(&event, ts + i as i64);
+        assert_eq!(
+            r.correlation_count(),
+            0,
+            "only 2 distinct tuples seen so far; should not fire"
+        );
+    }
+}
+
 // =========================================================================
 // Temporal correlation
 // =========================================================================

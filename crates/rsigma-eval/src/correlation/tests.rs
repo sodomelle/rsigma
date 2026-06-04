@@ -498,6 +498,123 @@ fn test_value_percentile_empty_window() {
 }
 
 #[test]
+fn test_value_median_empty_window_returns_none() {
+    // Regression: an empty median window used to return `0.0`, which
+    // spuriously satisfied `lte: 0` / `eq: 0` predicates. It must mirror the
+    // percentile branch and return `None` when there is no data to summarize.
+    let state = WindowState::new_for(CorrelationType::ValueMedian);
+    let cond = CompiledCondition {
+        field: Some(vec!["latency".to_string()]),
+        predicates: vec![(ConditionOperator::Lte, 0.0)],
+        percentile: None,
+    };
+    assert!(
+        state
+            .check_condition(&cond, CorrelationType::ValueMedian, &[], None)
+            .is_none(),
+        "empty median window must not fire on lte: 0"
+    );
+}
+
+#[test]
+fn test_compile_correlation_rejects_multi_field_numeric_aggregations() {
+    use rsigma_parser::parse_sigma_yaml;
+
+    // value_sum, value_avg, value_percentile, and value_median expect a
+    // single numeric field. The Sigma spec does not define how to combine
+    // several numeric fields, so compile must fail rather than silently use
+    // only the first field (the historical, data-losing behavior).
+    let kinds = [
+        // (correlation type, extra `condition:` lines).
+        ("value_sum", ""),
+        ("value_avg", ""),
+        ("value_percentile", "        percentile: 95\n"),
+        ("value_median", ""),
+    ];
+    for (corr_type, extra_condition) in kinds {
+        let yaml = format!(
+            r#"
+title: Base Rule
+id: 11111111-2222-3333-4444-555555555555
+logsource:
+    product: aws
+    service: cloudtrail
+detection:
+    selection:
+        eventSource: "s3.amazonaws.com"
+    condition: selection
+level: low
+---
+title: Multi-field numeric aggregation
+id: 22222222-3333-4444-5555-666666666666
+correlation:
+    type: {corr_type}
+    rules:
+        - 11111111-2222-3333-4444-555555555555
+    group-by:
+        - userIdentity.arn
+    timespan: 1h
+    condition:
+        field: [bytesIn, bytesOut]
+{extra_condition}        gte: 100
+level: high
+"#
+        );
+        let collection =
+            parse_sigma_yaml(&yaml).unwrap_or_else(|e| panic!("parse failed for {corr_type}: {e}"));
+        assert_eq!(
+            collection.correlations.len(),
+            1,
+            "no correlation parsed for {corr_type}; collected errors: {:?}",
+            collection.errors
+        );
+        let err = compile_correlation(&collection.correlations[0]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("single numeric field"),
+            "expected single-field error for `{corr_type}`, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn test_compile_correlation_accepts_single_field_numeric_aggregations() {
+    use rsigma_parser::parse_sigma_yaml;
+
+    let yaml = r#"
+title: Base Rule
+id: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+logsource:
+    product: aws
+    service: cloudtrail
+detection:
+    selection:
+        eventSource: "s3.amazonaws.com"
+    condition: selection
+level: low
+---
+title: Single-field median
+id: bbbbbbbb-cccc-dddd-eeee-ffffffffffff
+correlation:
+    type: value_median
+    rules:
+        - aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    group-by:
+        - userIdentity.arn
+    timespan: 1h
+    condition:
+        field: latency
+        gte: 100
+level: high
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    assert_eq!(collection.correlations.len(), 1);
+    let compiled = compile_correlation(&collection.correlations[0]).unwrap();
+    assert_eq!(compiled.correlation_type, CorrelationType::ValueMedian);
+    assert_eq!(compiled.condition.field, Some(vec!["latency".to_string()]));
+}
+
+#[test]
 fn test_extended_temporal_or_single_rule() {
     // "rule_a or rule_b" — only rule_a fired
     let mut rule_hits = HashMap::new();

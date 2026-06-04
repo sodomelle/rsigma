@@ -1,6 +1,6 @@
 # Linter and LSP
 
-The 67 lint rules are the single source of authority for "is this Sigma file well-formed"; the language server reuses them so an in-editor squiggle and a CI `rsigma rule lint` failure are byte-identical.
+The 66 lint rules are the single source of authority for "is this Sigma file well-formed"; the language server reuses them so an in-editor squiggle and a CI `rsigma rule lint` failure are byte-identical.
 
 This page explains how the two pieces fit together, how to add a new lint rule, and how to extend the LSP (`rsigma-lsp`).
 
@@ -35,7 +35,7 @@ The CLI and the LSP share the same `lint_yaml_str_with_config` function; their o
 
 | Type | Defined in | What it does |
 |------|------------|--------------|
-| `LintRule` | `crates/rsigma-parser/src/lint/mod.rs` | Enum with one variant per check (66 today). `Display` gives the snake_case ID used in CLI output, in YAML `# rsigma-disable:` suppressions, and in CI grep filters. |
+| `LintRule` | `crates/rsigma-parser/src/lint/mod.rs` | Enum with one variant per check (67 today, one of them the reserved `empty_filter_rules`). `Display` gives the snake_case ID used in CLI output, in YAML `# rsigma-disable:` suppressions, and in CI grep filters. |
 | `Severity` | same file | `Error`, `Warning`, `Info`, `Hint`. Severity is configurable per rule via `LintConfig.severity_overrides`; `--fail-level` decides which severity gates the exit code. |
 | `LintWarning` | same file | One finding. Carries the rule, severity, human message, JSON pointer `path`, optional source `Span` (line/col), and optional `Fix`. |
 | `Fix` + `FixPatch` + `FixDisposition` | same file | An auto-fix proposal. `FixDisposition` is `Safe` or `Unsafe`; only `Safe` fixes are applied by `rsigma rule lint --fix` and by LSP code actions. `FixPatch` is `ReplaceValue`, `ReplaceKey`, or `Remove`. |

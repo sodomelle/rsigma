@@ -483,4 +483,28 @@ mod tests {
         let event = JsonEvent::owned(v);
         assert!(event.field_keys().is_empty());
     }
+
+    #[test]
+    fn json_traversal_with_consecutive_dots_does_not_panic() {
+        // Pathological input -- a path like `a..b` used to be tokenised
+        // by `split('.')` into `["a", "", "b"]` and then walked head-by-
+        // head; the new `split_once('.')` recursion produces the same
+        // `("a", ".b")` -> `("", "b")` -> ... sequence with no
+        // allocation. Verify the lookup falls back to `None` rather
+        // than panicking or accidentally matching.
+        let v = json!({"a": {"b": "x"}});
+        let event = JsonEvent::borrow(&v);
+        assert_eq!(event.get_field("a..b"), None);
+    }
+
+    #[test]
+    fn json_traversal_with_trailing_dot_does_not_panic() {
+        // A trailing dot used to leave an empty trailing segment in the
+        // `Vec<&str>` path which the object branch tried to look up
+        // against the map; the iterator-based walker preserves that
+        // miss without allocating.
+        let v = json!({"a": {"b": "x"}});
+        let event = JsonEvent::borrow(&v);
+        assert_eq!(event.get_field("a.b."), None);
+    }
 }

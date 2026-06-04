@@ -179,13 +179,26 @@ pub(crate) fn cmd_migrate_sources(args: MigrateSourcesArgs) {
         _ => unreachable!(),
     }
 
-    // Rewrite pipeline files with sources: block removed
+    // Rewrite pipeline files with sources: block removed. A read failure
+    // here (file deleted between scan and rewrite, permission flip, …)
+    // used to panic the CLI; report the failure on stderr and keep
+    // processing the remaining pipelines, matching the soft-error
+    // behaviour the rewrite step itself already uses.
     for path in &pipeline_files {
-        let content = std::fs::read_to_string(path).unwrap();
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "warning: could not re-read {} to strip sources: {e}",
+                    path.display()
+                );
+                continue;
+            }
+        };
         let stripped = remove_sources_block(&content);
         if stripped != content {
             if let Err(e) = std::fs::write(path, &stripped) {
-                eprintln!("Warning: could not rewrite {}: {e}", path.display());
+                eprintln!("warning: could not rewrite {}: {e}", path.display());
             } else {
                 eprintln!("Removed sources: block from {}", path.display());
             }

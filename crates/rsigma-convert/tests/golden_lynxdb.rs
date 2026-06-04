@@ -1,12 +1,19 @@
 //! Golden tests for the LynxDB backend.
 //!
 //! Each test case consists of a `.yml` Sigma rule and a `.expected` output
-//! file in `tests/golden/lynxdb/`. The test parses the YAML, converts through
-//! the LynxDB backend, and asserts exact string equality with the expected output.
+//! file in `tests/golden/lynxdb/`. The test parses the YAML, drives the
+//! conversion through the same `convert_collection` entry point the CLI uses,
+//! and asserts exact string equality with the expected output.
+//!
+//! Routing through `convert_collection` (rather than calling
+//! `Backend::convert_rule` directly) keeps detection-rule goldens covering
+//! the same code path the `rsigma backend convert` CLI takes. Goldens that
+//! only contain detection rules and no pipelines flatten to the same output
+//! as the previous direct dispatch, so existing `.expected` files are
+//! unchanged.
 
-use rsigma_convert::Backend;
 use rsigma_convert::backends::lynxdb::LynxDbBackend;
-use rsigma_eval::pipeline::state::PipelineState;
+use rsigma_convert::convert_collection;
 use rsigma_parser::parse_sigma_yaml;
 use std::fs;
 use std::path::Path;
@@ -26,15 +33,21 @@ fn run_golden(name: &str) {
         .unwrap_or_else(|e| panic!("failed to parse {}: {e}", yaml_path.display()));
     let backend = LynxDbBackend::new();
 
-    let mut results = Vec::new();
-    for rule in &collection.rules {
-        let queries = backend
-            .convert_rule(rule, "default", &PipelineState::default())
-            .unwrap_or_else(|e| panic!("conversion failed for {name}: {e}"));
-        results.extend(queries);
-    }
+    let output = convert_collection(&backend, &collection, &[], "default")
+        .unwrap_or_else(|e| panic!("conversion failed for {name}: {e}"));
+    assert!(
+        output.errors.is_empty(),
+        "\n\nper-rule errors for '{name}':\n  {:#?}",
+        output.errors
+    );
 
-    let actual = results.join("\n");
+    let actual = output
+        .queries
+        .iter()
+        .flat_map(|r| r.queries.iter())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
     assert_eq!(
         actual, expected,
         "\n\nGolden test mismatch for '{name}':\n  actual:   {actual}\n  expected: {expected}\n"

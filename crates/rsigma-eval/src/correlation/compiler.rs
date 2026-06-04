@@ -105,17 +105,41 @@ fn compile_condition(
             predicates,
             field,
             percentile,
-        } => Ok((
-            CompiledCondition {
-                field: field.clone(),
-                predicates: predicates
-                    .iter()
-                    .map(|(op, count)| (*op, *count as f64))
-                    .collect(),
-                percentile: *percentile,
-            },
-            None,
-        )),
+        } => {
+            // Numeric aggregations operate on a single numeric field. The
+            // Sigma specification does not define how to combine several
+            // numeric fields under sum/avg/percentile/median, so reject the
+            // multi-field case at compile time rather than silently using
+            // only the first field (the historical behavior of this engine,
+            // which dropped data without warning).
+            if matches!(
+                corr_type,
+                CorrelationType::ValueSum
+                    | CorrelationType::ValueAvg
+                    | CorrelationType::ValuePercentile
+                    | CorrelationType::ValueMedian
+            ) && let Some(fields) = field
+                && fields.len() > 1
+            {
+                return Err(EvalError::CorrelationError(format!(
+                    "{:?} correlation requires a single numeric field, but {} were declared: {:?}",
+                    corr_type,
+                    fields.len(),
+                    fields
+                )));
+            }
+            Ok((
+                CompiledCondition {
+                    field: field.clone(),
+                    predicates: predicates
+                        .iter()
+                        .map(|(op, count)| (*op, *count as f64))
+                        .collect(),
+                    percentile: *percentile,
+                },
+                None,
+            ))
+        }
         CorrelationCondition::Extended(expr) => {
             match corr_type {
                 CorrelationType::Temporal | CorrelationType::TemporalOrdered => {

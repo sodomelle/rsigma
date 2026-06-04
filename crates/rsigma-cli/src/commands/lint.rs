@@ -80,8 +80,16 @@ pub(crate) fn cmd_lint(args: LintArgs, ctx: OutputCtx) -> LintCounts {
     } = args;
     let p = Painter::new(ctx.color);
 
-    // 0. Build lint config from file + CLI flags
-    let config = build_lint_config(&path, disable, lint_config_path, exclude, tag_namespaces);
+    // 0. Build lint config from file + CLI flags. `--quiet` suppresses
+    //    informational stderr from the config-loading layer below.
+    let config = build_lint_config(
+        &path,
+        disable,
+        lint_config_path,
+        exclude,
+        tag_namespaces,
+        ctx,
+    );
 
     // 1. Run built-in lint checks (with suppression)
     let results: Vec<FileLintResult> = if path.is_dir() {
@@ -225,55 +233,54 @@ pub(crate) fn cmd_lint(args: LintArgs, ctx: OutputCtx) -> LintCounts {
         }
     }
 
-    // 7. Summary
-    let passed = total_files - failed_files;
-    let separator = "─".repeat(60);
-    println!("{}", p.dim(&separator));
+    // 7. Summary. Gated by `ctx.show_stats()` so `--quiet` / `--no-stats`
+    //    skip the separator and the human "Checked N file(s)..." line.
+    //    The structured `tracing::info!` summary still fires for log
+    //    consumers because it is not part of the human output stream.
+    if ctx.show_stats() {
+        let passed = total_files - failed_files;
+        let separator = "─".repeat(60);
+        println!("{}", p.dim(&separator));
 
-    let passed_str = format!("{passed} passed");
-    let failed_str = format!("{failed_files} failed");
-    let errors_str = format!("{total_errors} error(s)");
-    let warnings_str = format!("{total_warnings} warning(s)");
-    let infos_str = format!("{total_infos} info(s)");
+        let passed_str = format!("{passed} passed");
+        let failed_str = format!("{failed_files} failed");
+        let errors_str = format!("{total_errors} error(s)");
+        let warnings_str = format!("{total_warnings} warning(s)");
+        let infos_str = format!("{total_infos} info(s)");
 
-    let passed_colored = if passed > 0 {
-        p.green_bold(&passed_str)
-    } else {
-        p.dim(&passed_str)
-    };
-    let failed_colored = if failed_files > 0 {
-        p.red_bold(&failed_str)
-    } else {
-        p.dim(&failed_str)
-    };
-    let errors_colored = if total_errors > 0 {
-        p.red(&errors_str)
-    } else {
-        p.dim(&errors_str)
-    };
-    let warnings_colored = if total_warnings > 0 {
-        p.yellow(&warnings_str)
-    } else {
-        p.dim(&warnings_str)
-    };
-    let infos_colored = if total_infos > 0 {
-        p.blue(&infos_str)
-    } else {
-        p.dim(&infos_str)
-    };
+        let passed_colored = if passed > 0 {
+            p.green_bold(&passed_str)
+        } else {
+            p.dim(&passed_str)
+        };
+        let failed_colored = if failed_files > 0 {
+            p.red_bold(&failed_str)
+        } else {
+            p.dim(&failed_str)
+        };
+        let errors_colored = if total_errors > 0 {
+            p.red(&errors_str)
+        } else {
+            p.dim(&errors_str)
+        };
+        let warnings_colored = if total_warnings > 0 {
+            p.yellow(&warnings_str)
+        } else {
+            p.dim(&warnings_str)
+        };
+        let infos_colored = if total_infos > 0 {
+            p.blue(&infos_str)
+        } else {
+            p.dim(&infos_str)
+        };
 
-    println!(
-        "Checked {} file(s): {}, {} ({}, {}, {})",
-        total_files,
-        passed_colored,
-        failed_colored,
-        errors_colored,
-        warnings_colored,
-        infos_colored,
-    );
+        println!(
+            "Checked {total_files} file(s): {passed_colored}, {failed_colored} ({errors_colored}, {warnings_colored}, {infos_colored})",
+        );
+    }
     tracing::info!(
         files = total_files,
-        passed,
+        passed = total_files - failed_files,
         failed = failed_files,
         errors = total_errors,
         warnings = total_warnings,
@@ -572,12 +579,17 @@ fn build_lint_config(
     lint_config_path: Option<PathBuf>,
     exclude: Vec<String>,
     tag_namespaces: Vec<String>,
+    ctx: OutputCtx,
 ) -> LintConfig {
-    // Load config file
+    // Operator-facing progress lines ("Loaded lint config: …") are
+    // pure informational and respect `--quiet` via `show_progress()`.
+    // Errors and warnings (failed load, bad config) always print.
     let mut config = if let Some(explicit) = lint_config_path {
         match LintConfig::load(&explicit) {
             Ok(c) => {
-                eprintln!("Loaded lint config: {}", explicit.display());
+                if ctx.show_progress() {
+                    eprintln!("Loaded lint config: {}", explicit.display());
+                }
                 c
             }
             Err(e) => {
@@ -588,7 +600,9 @@ fn build_lint_config(
     } else if let Some(found) = LintConfig::find_in_ancestors(path) {
         match LintConfig::load(&found) {
             Ok(c) => {
-                eprintln!("Loaded lint config: {}", found.display());
+                if ctx.show_progress() {
+                    eprintln!("Loaded lint config: {}", found.display());
+                }
                 c
             }
             Err(e) => {

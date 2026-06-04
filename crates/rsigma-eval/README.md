@@ -224,7 +224,11 @@ Stateful processing with sliding time windows, group-by aggregation, and all 8 c
 
 ### Value Percentile
 
-`value_percentile` uses linear interpolation (C=1 method). The condition threshold represents the percentile rank (0-100), clamped to that range.
+`value_percentile` uses linear interpolation (C=1 method). The `percentile` field on the condition (0-100, clamped) selects *which* percentile to compute from the window's values; the predicate threshold (`gte`, `lte`, etc.) is then compared against that computed value. For example, `percentile: 95` with `lte: 100` fires when the 95th-percentile latency in the window is at most 100ms. An empty window has no percentile and the condition is not evaluated.
+
+`value_median` is the 50th percentile under the same semantics. As with `value_percentile`, an empty window returns no value rather than `0.0`, so predicates like `lte: 0` cannot fire spuriously.
+
+`value_sum`, `value_avg`, `value_percentile`, and `value_median` operate on a single numeric field. Declaring multiple fields under `condition.field` for these correlation types is rejected at compile time, since the Sigma specification does not define how to combine several numeric fields under one of these aggregations. `value_count` supports a list of fields and counts distinct tuples.
 
 ## Output Types
 
