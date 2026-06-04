@@ -304,17 +304,6 @@ fn test_base64_offset_patterns() {
 }
 
 #[test]
-fn test_pattern_matches() {
-    assert!(pattern_matches("selection_*", "selection_main"));
-    assert!(pattern_matches("selection_*", "selection_"));
-    assert!(!pattern_matches("selection_*", "filter_main"));
-    assert!(pattern_matches("*", "anything"));
-    assert!(pattern_matches("*_filter", "my_filter"));
-    assert!(pattern_matches("exact", "exact"));
-    assert!(!pattern_matches("exact", "other"));
-}
-
-#[test]
 fn test_eval_condition_and() {
     let items_sel = vec![make_item(
         "CommandLine",

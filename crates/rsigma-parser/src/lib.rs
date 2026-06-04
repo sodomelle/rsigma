@@ -57,6 +57,7 @@ pub mod condition;
 pub mod error;
 pub mod lint;
 pub mod parser;
+pub mod selector;
 pub mod value;
 
 // Re-export the most commonly used types and functions at crate root
@@ -75,4 +76,5 @@ pub use lint::{
     lint_yaml_str_with_config, lint_yaml_value, parse_inline_suppressions,
 };
 pub use parser::{parse_field_spec, parse_sigma_directory, parse_sigma_file, parse_sigma_yaml};
+pub use selector::detection_name_matches;
 pub use value::{SigmaString, SigmaValue, SpecialChar, StringPart, Timespan};

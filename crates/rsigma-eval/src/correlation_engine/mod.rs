@@ -681,11 +681,9 @@ impl CorrelationEngine {
             }
             CorrelationType::ValueCount => {
                 if let Some(ref fields) = corr.condition.field
-                    && let Some(field_name) = fields.first()
-                    && let Some(val) = event.get_field(field_name)
-                    && let Some(s) = value_to_string_for_count(&val)
+                    && let Some(key) = composite_value_count_key(event, fields)
                 {
-                    state.push_value_count(ts, s);
+                    state.push_value_count(ts, key);
                 }
             }
             CorrelationType::Temporal | CorrelationType::TemporalOrdered => {
@@ -1267,6 +1265,30 @@ fn value_to_string_for_count(v: &EventValue) -> Option<String> {
         EventValue::Null => Some("null".to_string()),
         _ => None,
     }
+}
+
+/// Build a composite distinct-key for `value_count` over one or more fields.
+///
+/// Each field's value is rendered with [`value_to_string_for_count`] and the
+/// rendered parts are joined with `\u{1f}` (the ASCII Unit Separator), which
+/// is unlikely to occur in normal log data. If any field is missing or has a
+/// type that does not produce a stable string representation, the event is
+/// excluded from the distinct count (return `None`), matching the historical
+/// single-field behavior.
+fn composite_value_count_key(event: &impl Event, fields: &[String]) -> Option<String> {
+    // Common case: exactly one field. Avoid the separator overhead.
+    if let [field_name] = fields {
+        let val = event.get_field(field_name)?;
+        return value_to_string_for_count(&val);
+    }
+
+    let mut parts = Vec::with_capacity(fields.len());
+    for field_name in fields {
+        let val = event.get_field(field_name)?;
+        let rendered = value_to_string_for_count(&val)?;
+        parts.push(rendered);
+    }
+    Some(parts.join("\u{1f}"))
 }
 
 /// Convert an [`EventValue`] to f64 for numeric aggregation.

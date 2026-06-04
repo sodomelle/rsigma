@@ -5,6 +5,24 @@ Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma
 
 ## [Unreleased]
 
+### Sigma correctness: multi-field correlations, empty median, unsupported convert modifiers (#166)
+
+Closes a cluster of silently-wrong evaluation and conversion behaviors so v0.14.0 ships none of them.
+
+**Multi-field `value_count` now uses a composite distinct-key.** Previously the engine read `fields.first()` and ignored the rest, so `field: [User, SrcIp]` over events with the same user from different source IPs counted as one distinct value. The fix joins the rendered field values with the ASCII Unit Separator (`\u{1f}`) and counts distinct tuples; a missing field on any component drops the event (matching the prior single-field behavior). The single-field hot path keeps its old allocation profile.
+
+**Multi-field `value_sum` / `value_avg` / `value_percentile` / `value_median` are now rejected at compile time.** The Sigma spec does not define how to combine several numeric fields under one of these aggregations. The previous behavior silently used only the first field and dropped data. The compiler now returns a structured `CorrelationError` listing the offending fields.
+
+**Empty `value_median` windows now return `None`.** They used to return `0.0`, which spuriously satisfied predicates like `lte: 0` and `eq: 0`. The behavior now mirrors `value_percentile`, which already returned `None` for empty windows.
+
+**Detection-name selector matching is now consistent across crates.** The evaluator's `pattern_matches` lacked the middle-`*` branch (`sel*main`) that the converter had, so the same selector pattern silently resolved to different detection sets in eval vs convert. Hoist a single `detection_name_matches` (plus `SelectorPattern::matches_detection_name`) into `rsigma-parser` and reuse it from both crates, with cross-crate tests covering exact, full wildcard, prefix wildcard, suffix wildcard, and middle wildcard cases.
+
+**The `rsigma-convert` default item dispatch rejects modifiers it cannot express.** `default_convert_detection_item` previously fell through to `Backend::convert_field_eq_str` for any modifier it did not handle explicitly, so a rule using `|neq`, `|base64`, `|base64offset`, `|wide`, `|utf16`, `|utf16be`, `|windash`, `|expand`, regex flags without `re` (`|m`, `|s`), or timestamp parts (`|minute`/`|hour`/`|day`/`|week`/`|month`/`|year`) shipped SQL/SPL with different semantics from what the author wrote. The dispatch now returns `ConvertError::UnsupportedModifier` before the fall-through. Backends that handle one of these modifiers natively can override `Backend::convert_detection_item` and bypass the default. A defensive `ok_or_else` replaces the last `unwrap()` on the selector-dispatch path.
+
+**Dependency cleanup.** `base64` and `ipnet` were declared in `crates/rsigma-convert/Cargo.toml` but never referenced from anywhere under `crates/rsigma-convert/src/`. Dropped.
+
+**Docs.** `crates/rsigma-eval/README.md` now explains that `percentile` selects *which* percentile to compute (not the threshold), that an empty window does not fire, and that the four numeric aggregations require a single field.
+
 ### Custom tag namespaces for the linter (#161, #162)
 
 `rsigma rule lint` no longer forces teams to disable `unknown_tag_namespace` wholesale just to use organisation-specific tags. A repeatable `--tag-namespace <ns>` flag and a `tag_namespaces` list in `.rsigma-lint.yml` register extra namespaces that are recognised alongside the built-in spec set (`attack`, `car`, `cve`, `d3fend`, `detection`, `stp`, `tlp`). Namespace values are normalised to lowercase, and when `unknown_tag_namespace` does fire its message lists the full combined set of known namespaces.

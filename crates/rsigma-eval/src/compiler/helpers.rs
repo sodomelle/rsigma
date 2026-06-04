@@ -6,20 +6,6 @@ use rsigma_parser::SigmaValue;
 
 use crate::error::{EvalError, Result};
 
-/// Check if a detection name matches a selector pattern (supports `*` wildcard).
-pub(super) fn pattern_matches(pattern: &str, name: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return name.starts_with(prefix);
-    }
-    if let Some(suffix) = pattern.strip_prefix('*') {
-        return name.ends_with(suffix);
-    }
-    pattern == name
-}
-
 /// Convert a `yaml_serde::Value` to a `serde_json::Value`.
 pub(super) fn yaml_to_json(value: &yaml_serde::Value) -> serde_json::Value {
     match value {

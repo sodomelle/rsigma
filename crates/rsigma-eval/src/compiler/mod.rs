@@ -27,8 +27,8 @@ use regex::Regex;
 
 use rsigma_parser::value::{SpecialChar, StringPart};
 use rsigma_parser::{
-    ConditionExpr, Detection, DetectionItem, Level, LogSource, Modifier, Quantifier,
-    SelectorPattern, SigmaRule, SigmaString, SigmaValue,
+    ConditionExpr, Detection, DetectionItem, Level, LogSource, Modifier, Quantifier, SigmaRule,
+    SigmaString, SigmaValue,
 };
 
 use crate::error::{EvalError, Result};
@@ -38,8 +38,8 @@ use crate::result::{DetectionBody, EvaluationResult, FieldMatch, ResultBody, Rul
 
 pub(crate) use helpers::yaml_to_json_map;
 use helpers::{
-    base64_offset_patterns, build_regex, expand_windash, pattern_matches, sigma_string_to_bytes,
-    to_utf16_bom_bytes, to_utf16be_bytes, to_utf16le_bytes, value_to_f64, value_to_plain_string,
+    base64_offset_patterns, build_regex, expand_windash, sigma_string_to_bytes, to_utf16_bom_bytes,
+    to_utf16be_bytes, to_utf16le_bytes, value_to_f64, value_to_plain_string,
 };
 
 // =============================================================================
@@ -811,16 +811,10 @@ where
             quantifier,
             pattern,
         } => {
-            let matching_names: Vec<&String> = match pattern {
-                SelectorPattern::Them => detections
-                    .keys()
-                    .filter(|name| !name.starts_with('_'))
-                    .collect(),
-                SelectorPattern::Pattern(pat) => detections
-                    .keys()
-                    .filter(|name| pattern_matches(pat, name))
-                    .collect(),
-            };
+            let matching_names: Vec<&String> = detections
+                .keys()
+                .filter(|name| pattern.matches_detection_name(name))
+                .collect();
 
             let mut match_count = 0u64;
             for name in &matching_names {
