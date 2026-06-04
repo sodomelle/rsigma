@@ -3887,9 +3887,7 @@ dependencies = [
 name = "rsigma-convert"
 version = "0.13.0"
 dependencies = [
- "base64",
  "insta",
- "ipnet",
  "log",
  "regex",
  "rsigma-eval",
