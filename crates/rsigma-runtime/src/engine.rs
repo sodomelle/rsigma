@@ -94,10 +94,23 @@ impl RuntimeEngine {
         self.bloom_prefilter = enabled;
     }
 
+    /// Return the current bloom pre-filter setting. Used by hot-reload to
+    /// carry tuning across a `RuntimeEngine` swap so a daemon-startup
+    /// `set_bloom_prefilter(true)` does not silently revert on the first
+    /// reload.
+    pub fn bloom_prefilter(&self) -> bool {
+        self.bloom_prefilter
+    }
+
     /// Override the bloom memory budget on the inner detection engine.
     /// Applies on the next `load_rules()`.
     pub fn set_bloom_max_bytes(&mut self, max_bytes: usize) {
         self.bloom_max_bytes = Some(max_bytes);
+    }
+
+    /// Return the configured bloom memory budget, if one was set.
+    pub fn bloom_max_bytes(&self) -> Option<usize> {
+        self.bloom_max_bytes
     }
 
     /// Enable or disable the cross-rule Aho-Corasick pre-filter on the
@@ -109,6 +122,12 @@ impl RuntimeEngine {
     #[cfg(feature = "daachorse-index")]
     pub fn set_cross_rule_ac(&mut self, enabled: bool) {
         self.cross_rule_ac = enabled;
+    }
+
+    /// Return the current cross-rule Aho-Corasick setting.
+    #[cfg(feature = "daachorse-index")]
+    pub fn cross_rule_ac(&self) -> bool {
+        self.cross_rule_ac
     }
 
     /// Set a source resolver for dynamic pipeline sources.
