@@ -1,10 +1,10 @@
 # Prometheus Metrics
 
-The `engine daemon` exposes Prometheus metrics on `GET /metrics` on the same `--api-addr` as the REST API. The full definition catalogue is 30 metric names across four concerns; the runtime exposes the ones that have ever fired in a given process. The three field-observer surfaces always render their `# HELP`/`# TYPE` lines (and stay at zero unless `--observe-fields` was passed); the others follow the lazy-registration pattern documented per section below.
+The `engine daemon` exposes Prometheus metrics on `GET /metrics` on the same `--api-addr` as the REST API. The full definition catalogue under `--all-features` (which is how the prebuilt release archives and the GHCR Docker image are built) is 38 metric names across seven concerns: 33 are always registered, and the OTLP (3) and TLS (2) families are feature-gated on `daemon-otlp` and `daemon-tls` respectively. The runtime exposes the ones that have ever fired in a given process. The three field-observer surfaces always render their `# HELP`/`# TYPE` lines (and stay at zero unless `--observe-fields` was passed); the others follow the lazy-registration pattern documented per section below.
 
 The exact source of truth is the [`daemon/metrics`](https://github.com/timescale/rsigma/blob/main/crates/rsigma-cli/src/daemon/metrics.rs) module.
 
-## Engine core (16 metrics)
+## Engine core (17 metrics)
 
 These always show up. They cover ingest, matches, queue depth, back-pressure, reloads, and resource usage.
 

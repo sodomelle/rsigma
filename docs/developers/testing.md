@@ -53,21 +53,28 @@ E2E tests cross the binary boundary or stand up real external services through c
 
 ### CLI E2E (`crates/rsigma-cli/tests/cli_*.rs`)
 
-The 12 `cli_*.rs` files contain **167 tests** that invoke the freshly built `rsigma` binary via [`assert_cmd`](https://docs.rs/assert_cmd). They exercise stdin, stdout, stderr, exit codes, and (for the daemon tests) the full HTTP, NATS, and OTLP wire surface.
+The 19 `cli_*.rs` files contain roughly 250 tests that invoke the freshly built `rsigma` binary via [`assert_cmd`](https://docs.rs/assert_cmd). They exercise stdin, stdout, stderr, exit codes, and (for the daemon tests) the full HTTP, NATS, and OTLP wire surface. Run `cargo test -p rsigma --tests -- --list | wc -l` for the exact discovered count against your tree; the per-file table below is for orientation rather than as a contract.
 
 | File | Tests | What it covers |
 |------|------:|----------------|
+| `cli_config.rs` | 15 | `config init`, `validate`, `show`, `schema`, `path`, `reload`; layered file / env / flag precedence. |
 | `cli_convert.rs` | 14 | `backend convert` against every shipped backend and output format. |
-| `cli_daemon.rs` | 20 | Long-running daemon (stdin input), hot-reload, health, shutdown. |
+| `cli_daemon.rs` | 21 | Long-running daemon (stdin input), hot-reload, health, shutdown. |
 | `cli_daemon_dynamic.rs` | 16 | Dynamic-pipeline source resolution end-to-end via the daemon's `POST /api/v1/sources/resolve`. |
+| `cli_daemon_enrichment.rs` | 2 | Smoke for the in-process enricher chain wired to the daemon. |
+| `cli_daemon_fields_observer.rs` | 8 | `--observe-fields` gap / broken-coverage reports across `/api/v1/fields*`. |
 | `cli_daemon_http.rs` | 10 | HTTP input mode, `POST /api/v1/events`, OTLP HTTP. |
 | `cli_daemon_nats.rs` | 8 | NATS input + sink over an in-process NATS server. |
 | `cli_daemon_otlp.rs` | 9 | OTLP HTTP and gRPC ingest, with the metric-label assertions added in PR #115. |
+| `cli_daemon_tls.rs` | 12 | `daemon-tls` flag surface, mTLS, SIGHUP-triggered cert hot-reload. |
 | `cli_deprecation.rs` | 17 | Every deprecated flat alias still works and prints the correct stderr migration warning. |
-| `cli_eval.rs` | 32 | `engine eval`: inline events, `@file`, stdin, `jq` / JSONPath, fail-on-detection, exit codes. |
+| `cli_eval.rs` | 40 | `engine eval`: inline events, `@file`, stdin, `jq` / JSONPath, fail-on-detection, exit codes. |
 | `cli_fields.rs` | 16 | `rule fields` extraction across detection items, correlation, filters; `--no-filters`, `--json`. |
-| `cli_lint.rs` | 21 | `rule lint`, `.rsigma-lint.yml`, `# rsigma-disable` suppressions, `--fix`. |
+| `cli_lint.rs` | 24 | `rule lint`, `.rsigma-lint.yml`, `# rsigma-disable` suppressions, `--fix`, `--output-format json/ndjson/csv/tsv`. |
+| `cli_migrate_sources.rs` | 4 | `rule migrate-sources` strategies and the post-extraction pipeline rewrite. |
+| `cli_output_format.rs` | 19 | Cross-command global `--output-format`, `--color`, `--quiet`, `--no-stats` resolution. |
 | `cli_parse.rs` | 8 | `rule parse` exit-code and structured-error contract. |
+| `cli_sources_deprecation.rs` | 6 | Stderr warning when a pipeline still declares inline sources after the deprecation. |
 | `cli_validate.rs` | 4 | `rule validate` against good and bad rule sets. |
 
 The shared harness in `crates/rsigma-cli/tests/common/mod.rs` is the canonical reference for spawning a long-running daemon under test: it drains stdout in a background thread to prevent pipe stalls, forwards stderr lines via `mpsc`, probes the actual TCP socket with `TcpStream::connect_timeout` before returning a handle, and wraps the `Child` in a `ChildGuard` RAII type that kills it on drop. PR #115 hardened this against macOS-under-load flakes by replacing every `std::thread::sleep` wait with a `poll_until` retry loop that polls the actual observable condition (HTTP status, metric counter) every 50 ms up to a 5 s deadline. Use it for any new daemon-level test; do not roll your own.

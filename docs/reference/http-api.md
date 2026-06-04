@@ -17,6 +17,7 @@ All bodies are JSON unless otherwise noted. All responses include a `Content-Typ
 | `/api/v1/events` | POST | none | NDJSON event ingest. Only enabled with `--input http`. |
 | `/api/v1/sources` | GET | none | Dynamic pipeline sources currently registered. |
 | `/api/v1/sources/resolve` | POST | none | Force re-resolution of all dynamic sources (with no body) or one specific source (with `{"source_id":"..."}`). |
+| `/api/v1/sources/resolve/{source_id}` | POST | none | Force re-resolution of a single source by path parameter (no body). Equivalent to the body variant above; useful when the caller has to fit inside an HTTP client that does not send a JSON body on `POST`. |
 | `/api/v1/sources/cache/{source_id}` | DELETE | none | Invalidate one source's cache so the next read fetches fresh. |
 | `/api/v1/fields` | GET | none | Combined gap + broken-coverage report. Requires `--observe-fields`. |
 | `/api/v1/fields/unknown` | GET | none | Fields seen in events that no rule references. Requires `--observe-fields`. |
@@ -25,7 +26,7 @@ All bodies are JSON unless otherwise noted. All responses include a `Content-Typ
 | `/v1/logs` | POST | none | OTLP/HTTP log ingestion (`application/x-protobuf` or `application/json`, optionally gzip-encoded). Requires `daemon-otlp`. |
 | OTLP/gRPC `LogsService/Export` | gRPC | none | OTLP over gRPC on the same `--api-addr`. Requires `daemon-otlp`. |
 
-The daemon does not implement authentication today; deploy it behind a reverse proxy or restrict the bind address to a trusted network. TLS termination is on the [roadmap](https://github.com/timescale/rsigma/issues/128).
+The daemon does not implement authentication today; deploy it behind a reverse proxy or restrict the bind address to a trusted network. In-process TLS termination is available via the optional `daemon-tls` build feature: pass `--tls-cert` / `--tls-key` to terminate TLS for the HTTP REST, OTLP/HTTP, and OTLP/gRPC surfaces on the same `--api-addr`, and `--tls-client-ca` to require mTLS. See [TLS termination for the API listener](security.md#tls-termination-for-the-api-listener) for the full flag set.
 
 ## Probes
 
@@ -202,6 +203,20 @@ If no dynamic sources are configured:
 {"error":"no dynamic sources configured"}
 ```
 
+### `POST /api/v1/sources/resolve/{source_id}`
+
+Force re-resolution of one named source via a path parameter, with no request body. Equivalent to the body variant of `POST /api/v1/sources/resolve` and useful for clients that cannot send a JSON body on `POST` (some load balancers, the simplest `curl --data ''` recipes, etc.).
+
+```bash
+curl -sS -X POST http://127.0.0.1:9090/api/v1/sources/resolve/ip_blocklist
+```
+
+```json
+{"status":"resolve_triggered","source_id":"ip_blocklist"}
+```
+
+Returns `404 {"error":"no dynamic sources configured"}` when no sources are registered, and `429 {"status":"resolve_already_pending"}` if a refresh for the same `source_id` is still in flight.
+
 ### `DELETE /api/v1/sources/cache/{source_id}`
 
 Invalidate the cached value for one source so the next refresh fetches fresh. Useful when an upstream feed regenerates content out-of-band of its declared TTL.
@@ -357,4 +372,4 @@ See [OTLP Integration](../guide/otlp-integration.md) for full agent recipes (Gra
 - [Prometheus Metrics](metrics.md) for `/metrics` definitions and alert recipes.
 - [Observability](../guide/observability.md) for the broader `tracing` and metrics story.
 - [Processing Pipelines: dynamic pipelines](../guide/processing-pipelines.md#dynamic-pipelines) for the source declarations exposed by `/api/v1/sources`.
-- [Issue #128 (TLS for daemon API + OTLP)](https://github.com/timescale/rsigma/issues/128) for the planned TLS termination.
+- [Security: TLS termination for the API listener](security.md#tls-termination-for-the-api-listener) for the optional `daemon-tls` build feature and the `--tls-*` flag set.

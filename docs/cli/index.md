@@ -16,13 +16,17 @@ This reference documents every subcommand with its flag table, verified examples
 
 ## Global flags
 
-Every subcommand accepts one global flag:
+Every subcommand accepts five global flags. They share the same layered precedence as the rest of the configuration: **flag > `RSIGMA_GLOBAL__*` env > `global.*` in the YAML config > built-in default**. The `--output-format` and `--color` defaults are TTY-aware, so `rsigma … | jq` and `rsigma …` in a terminal both do the right thing without an explicit override.
 
 | Flag | Default | Values | Effect |
 |------|---------|--------|--------|
 | `--log-format` | unset | `json`, `text` | Emit structured diagnostic logs to stderr via `tracing-subscriber`. Verbosity controlled by `RUST_LOG` (default `info`). Has no effect on `engine daemon`, which always logs JSON. |
+| `--output-format` | TTY-aware | `json`, `ndjson`, `table`, `csv`, `tsv` | Selects the wire format for any tabular data the subcommand emits. Default is pretty `json` on a TTY and `ndjson` when piped. |
+| `--color` | `auto` | `auto`, `always`, `never` | Controls ANSI color on human-readable paths (lint findings, summaries). Honours [`NO_COLOR`](https://no-color.org/) when `auto`. |
+| `--quiet` / `-q` | off | flag | Suppress every non-data line (progress, summary, fallback warnings). Errors still go to stderr. |
+| `--no-stats` | off | flag | Suppress only the trailing summary / stats line. Progress messages still appear. |
 
-`--log-format` adds the diagnostic-log stream alongside the existing stdout/stderr output; it never replaces them. See [Observability](../guide/observability.md) for the full RUST_LOG target catalog.
+`--log-format` adds the diagnostic-log stream alongside the existing stdout/stderr output; it never replaces them. See [Observability](../guide/observability.md) for the full RUST_LOG target catalog. For the output formats and color resolution model see the [Output reference](../reference/output.md).
 
 ## Command tree
 
@@ -34,7 +38,8 @@ rsigma
 ├── rule
 │   ├── parse                  parse a single rule file, dump AST as JSON
 │   ├── validate               parse + compile a directory of rules
-│   ├── lint                   run the 66 lint checks
+│   ├── lint                   run the 65 lint checks
+│   ├── migrate-sources        extract pipeline-embedded sources into standalone files
 │   ├── fields                 list every field referenced by the rules
 │   ├── condition              parse a condition expression, dump AST
 │   └── stdin                  parse a rule from stdin

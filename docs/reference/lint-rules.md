@@ -1,6 +1,6 @@
 # Lint Rules
 
-`rsigma rule lint` runs 66 built-in checks derived from the Sigma v2.1.0 specification. This page is the canonical catalogue: every rule's ID, default severity, what it flags, and whether `--fix` can auto-correct it.
+`rsigma rule lint` runs 65 built-in checks derived from the Sigma v2.1.0 specification, plus 1 reserved enum value (`empty_filter_rules`) that no production code currently emits. This page is the canonical catalogue: every rule's ID, default severity, what it flags, and whether `--fix` can auto-correct it.
 
 For the workflow and CLI surface see [Linting Rules](../guide/linting-rules.md) and the [`rule lint` CLI reference](../cli/rule/lint.md). For the source of truth see [`crates/rsigma-parser/src/lint`](https://github.com/timescale/rsigma/tree/main/crates/rsigma-parser/src/lint).
 
@@ -125,9 +125,9 @@ Apply to correlation rules (`correlation:` block).
 | `generate_not_boolean` | `error` | — | The `generate:` field is not a boolean. |
 | `invalid_condition_operator` | `error` | — | The condition uses an operator not valid for the correlation type (e.g. `lt` is not valid for `event_count`). |
 
-## Filter rules (7)
+## Filter rules (8 IDs, 7 emitted)
 
-Apply to filter rules (`kind: filter` with a `filter:` block).
+Apply to filter rules (`kind: filter` with a `filter:` block). The eighth row (`empty_filter_rules`) is reserved: the variant exists in the lint-rule enum and is asserted in a regression test, but no production code path emits it today.
 
 | Rule | Severity | Fix | Description |
 |------|----------|-----|-------------|
@@ -140,9 +140,9 @@ Apply to filter rules (`kind: filter` with a `filter:` block).
 | `filter_has_status` | `warning` | yes | Filter rules should not carry `status:`. The fix removes the field. |
 | `empty_filter_rules` | reserved | — | Variant declared in the enum and asserted in a regression test, but no production code emits it today. May be repurposed in a future release. |
 
-## Detection-modifier hygiene (5)
+## Detection-modifier hygiene (7)
 
-A subset of the detection rules above, grouped here because they all flag modifier misuses on a specific detection item.
+Grouped here because they all flag modifier misuses on a specific detection item; none of these IDs also appear in the detection section above.
 
 | Rule | Severity | Fix | Description |
 |------|----------|-----|-------------|

@@ -4,8 +4,17 @@ Criterion benchmark results for the rsigma detection engine.
 
 **Hardware**: Apple M4 Pro, macOS  
 **Profile**: `bench` (optimized, release)  
-**Date**: 2026-05-07  
-**Version**: 0.9.0
+**Date captured**: 2026-05-07  
+**Captured on version**: 0.9.0
+
+> **Freshness note.** These figures were captured on rsigma 0.9.0;
+> the workspace has since shipped through 0.13.0 and parts of the
+> hot path (matcher dispatch, dot-path traversal, modifier
+> validation) have changed. Treat the numbers as a baseline shape,
+> not a per-release benchmark. To refresh for a specific release,
+> check out the matching tag and run `cargo bench` per the
+> commands listed in [Running](#running) below; update the
+> hardware/date/version block above when you do.
 
 ## Running
 

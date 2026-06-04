@@ -91,7 +91,7 @@ Spans are emitted alongside events. To capture them in a structured aggregator (
 
 ## Prometheus metrics
 
-The daemon binds `/metrics` on the same `--api-addr` as the REST API. It exposes 27 metric definitions across three concerns:
+The daemon binds `/metrics` on the same `--api-addr` as the REST API. It exposes 38 metric definitions across seven concerns under `--all-features` (33 always-present plus 3 OTLP + 2 TLS gated on the matching build features):
 
 | Concern | Metrics | What they answer |
 |---------|---------|------------------|
@@ -100,9 +100,11 @@ The daemon binds `/metrics` on the same `--api-addr` as the REST API. It exposes
 | **Rule and state load** | `rsigma_detection_rules_loaded`, `rsigma_correlation_rules_loaded`, `rsigma_correlation_state_entries`, `rsigma_reloads_total`, `rsigma_reloads_failed_total`, `rsigma_dlq_events_total` | How many rules are loaded, how full is the correlation state, are reloads succeeding? |
 | **Per-rule labels** (appear after first match) | `rsigma_detection_matches_by_rule_total{rule_id="..."}`, `rsigma_correlation_matches_by_rule_total{rule_id="..."}` | Which specific rules are firing? |
 | **Dynamic sources** (with `-p` pipelines that declare sources) | `rsigma_source_resolves_total`, `rsigma_source_resolve_errors_total`, `rsigma_source_resolve_seconds`, `rsigma_source_cache_hits_total`, `rsigma_source_last_resolved_timestamp` | Are HTTP/file/command sources reachable and timely? |
+| **Enrichment** | `rsigma_enrichment_total`, `rsigma_enrichment_duration_seconds`, `rsigma_enrichment_queue_depth`, `rsigma_enrichment_http_cache_hits_total`, `rsigma_enrichment_http_cache_misses_total`, `rsigma_enrichment_http_cache_expirations_total` | How is the enricher chain performing and how often does the HTTP cache pay off? |
 | **OTLP** (with `daemon-otlp` feature) | `rsigma_otlp_requests_total`, `rsigma_otlp_log_records_total`, `rsigma_otlp_errors_total` | How are upstream OTLP agents behaving? |
+| **TLS** (with `daemon-tls` feature) | `rsigma_tls_certificate_expiry_seconds`, `rsigma_tls_active_connections` | When does the server cert expire (alert on `< 7d`) and how many TLS clients are connected? |
 
-Some metrics only appear after their first relevant event (per-rule labels, OTLP counters). A startup `/metrics` scrape shows about 20 distinct metric names; the full 27 emerge as the daemon does real work.
+Some metrics only appear after their first relevant event (per-rule labels, enrichment counters, OTLP counters, TLS handshake failures). A startup `/metrics` scrape shows about 20 distinct metric names; the full 38 emerge as the daemon does real work and as the feature-gated surfaces are exercised.
 
 Scrape `/metrics` at 15-30 s intervals. The histograms (`event_processing_seconds`, `pipeline_latency_seconds`, `batch_size`) use the default Prometheus bucket boundaries; alert on the `_bucket{le="..."}` quantiles you care about rather than on the raw average.
 
@@ -239,6 +241,6 @@ The first line of `/metrics` should be a `# HELP rsigma_back_pressure_events_tot
 - [Streaming Detection](streaming-detection.md) for the daemon's HTTP API surface that complements the metrics endpoint.
 - [Performance Tuning](performance-tuning.md) for which metric to watch when sizing `--buffer-size`, `--batch-size`, or correlation `max_state_entries`.
 - [NATS Streaming](nats-streaming.md) for the NATS-specific log targets (`async_nats::connector`).
-- [Prometheus metrics reference](../reference/metrics.md) for the full 30-metric catalog.
+- [Prometheus metrics reference](../reference/metrics.md) for the full 38-metric catalog.
 - [HTTP API reference](../reference/http-api.md) for every endpoint exposed alongside `/metrics`.
 - [`tracing` filter syntax](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives) for the exact `RUST_LOG` directive grammar.

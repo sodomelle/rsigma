@@ -220,7 +220,7 @@ Verified Criterion numbers ship in the [Benchmarks](../benchmarks.md) page. Head
 
 ## Threat model
 
-RSigma assumes a trusted operator providing rules, pipelines, and source declarations on disk, plus an event stream from a trusted upstream agent. Every external input is bounded by a hard limit (event size, condition size, response body size, command execution time, recursion depth) so a malformed input cannot exhaust memory or CPU. The daemon HTTP and gRPC listeners are unauthenticated today; deploy them behind a reverse proxy until [in-process TLS](https://github.com/timescale/rsigma/issues/128) ships. Full catalogue in [Security Hardening](security.md).
+RSigma assumes a trusted operator providing rules, pipelines, and source declarations on disk, plus an event stream from a trusted upstream agent. Every external input is bounded by a hard limit (event size, condition size, response body size, command execution time, recursion depth) so a malformed input cannot exhaust memory or CPU. The daemon HTTP and gRPC listeners are unauthenticated today; either deploy behind a reverse proxy or build with the optional `daemon-tls` feature and terminate TLS in-process via the `--tls-cert` / `--tls-key` (and optionally `--tls-client-ca` for mTLS) flags. Full catalogue in [Security Hardening](security.md).
 
 ## See also
 
