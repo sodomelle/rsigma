@@ -5,7 +5,7 @@ Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma
 
 ## [Unreleased]
 
-### Documentation accuracy: TLS, feature flags, metric and lint counts, CLI surface, endpoint inventory, benchmark freshness
+### Documentation accuracy: TLS, feature flags, metric and lint counts, CLI surface, endpoint inventory, benchmark freshness (#181)
 
 A docs-only sweep that closes the accuracy gaps that accumulated over the v0.13.x line. No source code changes; every fix points the documentation at the actual behaviour that ships in the binary.
 
