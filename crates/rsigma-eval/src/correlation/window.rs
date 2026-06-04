@@ -232,24 +232,26 @@ impl WindowState {
                 return Some(pval);
             }
             (WindowState::NumericAgg { entries }, CorrelationType::ValueMedian) => {
+                // An empty window has no median. Returning `0.0` here would
+                // spuriously satisfy predicates like `lte: 0` or `eq: 0`, so
+                // match the percentile branch and skip evaluation.
                 if entries.is_empty() {
-                    0.0
+                    return None;
+                }
+                let mut values: Vec<f64> = entries
+                    .iter()
+                    .map(|(_, v)| *v)
+                    .filter(|v| v.is_finite())
+                    .collect();
+                if values.is_empty() {
+                    return None;
+                }
+                values.sort_by(|a, b| a.total_cmp(b));
+                let mid = values.len() / 2;
+                if values.len().is_multiple_of(2) && values.len() >= 2 {
+                    (values[mid - 1] + values[mid]) / 2.0
                 } else {
-                    let mut values: Vec<f64> = entries
-                        .iter()
-                        .map(|(_, v)| *v)
-                        .filter(|v| v.is_finite())
-                        .collect();
-                    if values.is_empty() {
-                        return None;
-                    }
-                    values.sort_by(|a, b| a.total_cmp(b));
-                    let mid = values.len() / 2;
-                    if values.len().is_multiple_of(2) && values.len() >= 2 {
-                        (values[mid - 1] + values[mid]) / 2.0
-                    } else {
-                        values[mid]
-                    }
+                    values[mid]
                 }
             }
             _ => return None, // mismatched state/type
