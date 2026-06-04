@@ -5,6 +5,20 @@ Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma
 
 ## [Unreleased]
 
+### Parser and CLI diagnostics: invalid metadata, output controls, panic-free migrate (#179)
+
+Tightens five small but visible cracks in the parser and CLI surface that all silently swallowed problems an operator was almost certainly trying to catch.
+
+**Invalid `status` / `level` and malformed `related:` entries are now surfaced.** `parse_detection_rule`, `parse_correlation_rule`, and `parse_filter_rule` previously coerced any unparseable `status:` or `level:` into a silent `None` (`get_str(m, "status").and_then(|s| s.parse().ok())`), and `parse_related` `filter_map`ped away any item that was not a mapping, was missing `id`/`type`, or carried an unknown `type`. A typo such as `status: stabel` or `type: derved` round-tripped to the in-memory rule with the field absent and no diagnostic. The parsers now thread a `&mut Vec<String>` for warnings, push index-qualified messages (`related[2] invalid type 'derved' (expected one of: derived, obsolete, merged, renamed, similar)`), and let `parse_sigma_yaml` extend `SigmaCollection.errors` with the result. Existing CLI surfaces (`rule parse`, `rule validate`, the "Loaded rules" path) already render `collection.errors`, so the new warnings flow through unchanged.
+
+**New `SigmaCollection` ergonomics.** Three helpers cover the "treat any error as failure" path that downstream callers were re-implementing each time: `SigmaCollection::has_errors()`, `SigmaCollection::error_count()`, and `SigmaCollection::into_result()` (consumes the collection and returns `Err(Vec<String>)` when anything failed, `Ok(self)` on a clean parse). The stale doc on the `errors` field that referenced a non-existent `collect_errors` flag is replaced with the actual contract.
+
+**`rule lint` honours `--quiet` and `--no-stats`.** Both global flags had no effect on the human renderer, so CI scrapers that piped only findings still got a "Loaded lint config: …" progress line on stderr and a "Checked N file(s): … passed, … failed" trailing summary on stdout. The summary block is now gated by `OutputCtx::show_stats()` and the config-load progress by `show_progress()`; findings still print under both flags. The structured `tracing::info!("Lint summary", …)` event continues to fire so log-based consumers still see the per-run totals.
+
+**Invalid `global.output_format` / `global.color` config values now warn instead of silently falling back.** A typo like `output_format: xml` or `color: rainbow` in the YAML config used to bypass the `OutputFormat::parse` / `ColorChoice::parse` filter, return `None`, and revert the operator to the TTY-aware defaults with no signal. A new `output::warn_invalid_global_output` wrapper between `config::discovered_global_output` and `OutputCtx::resolve` validates both strings, emits a stderr warning that lists the accepted alternatives, and strips the bad value so the resolver still falls back cleanly. The command itself still succeeds because the warning is informational.
+
+**`rule migrate-sources` no longer panics on a pipeline read race.** After writing the extracted `sources.yml`, the rewrite loop in `cmd_migrate_sources` re-read each pipeline file with `std::fs::read_to_string(path).unwrap()`. A file deleted between scan and rewrite (or a permission flip on a flaky filesystem) crashed the CLI. The read now matches the soft-error pattern the `std::fs::write` call below it already used: print a `warning:` line, skip the offending pipeline, and keep going. The extracted sources file is already on disk at that point, so a single unreadable pipeline does not invalidate the other rewrites.
+
 ### Release pipeline, CI, Docker, and supply-chain hardening
 
 Tightens every link in the release chain before v0.14.0 ships so the act of publishing itself does not undermine the correctness work that already landed.

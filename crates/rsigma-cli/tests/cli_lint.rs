@@ -510,3 +510,39 @@ detection:
         "duplicate tag should be removed"
     );
 }
+
+#[test]
+fn lint_quiet_suppresses_summary_and_config_progress() {
+    let rule = temp_file(".yml", LINT_INVALID_LEVEL);
+    rsigma()
+        .args(["--quiet", "rule", "lint", rule.path().to_str().unwrap()])
+        .assert()
+        .stdout(
+            predicate::str::contains("Checked")
+                .not()
+                .and(predicate::str::contains("file(s):").not()),
+        )
+        .stderr(predicate::str::contains("Loaded lint config").not());
+}
+
+#[test]
+fn lint_no_stats_suppresses_summary_but_keeps_findings() {
+    let rule = temp_file(".yml", LINT_INVALID_LEVEL);
+    rsigma()
+        .args(["--no-stats", "rule", "lint", rule.path().to_str().unwrap()])
+        .assert()
+        .stdout(
+            predicate::str::contains("Checked")
+                .not()
+                .and(predicate::str::contains("invalid_level")),
+        );
+}
+
+#[test]
+fn lint_quiet_still_emits_findings() {
+    let rule = temp_file(".yml", LINT_INVALID_LEVEL);
+    rsigma()
+        .args(["--quiet", "rule", "lint", rule.path().to_str().unwrap()])
+        .assert()
+        .stdout(predicate::str::contains("invalid_level"));
+}
