@@ -57,6 +57,7 @@ pub mod condition;
 pub mod error;
 pub mod lint;
 pub mod parser;
+pub mod selector;
 pub mod value;
 
 // Re-export the most commonly used types and functions at crate root
@@ -67,6 +68,7 @@ pub use ast::{
     SigmaCollection, SigmaDocument, SigmaRule, Status,
 };
 pub use condition::parse_condition;
+pub use selector::detection_name_matches;
 pub use error::{Result, SigmaParserError, SourceLocation};
 pub use lint::{
     FileLintResult, Fix, FixDisposition, FixPatch, InlineSuppressions, LintConfig, LintRule,
