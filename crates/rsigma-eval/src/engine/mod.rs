@@ -573,9 +573,9 @@ impl Engine {
     }
 
     fn evaluate_no_bloom_path<E: Event>(&self, event: &E) -> Vec<EvaluationResult> {
-        // The public `evaluate_rule` is not generic over `BloomLookup`, so
-        // the no-bloom hot path lowers to straight-line code identical to
-        // the pre-bloom engine.
+        // Pass the zero-sized `NoBloom` lookup so this monomorphizes to the
+        // same straight-line code as the pre-bloom engine while still
+        // threading the configured match-detail level.
         let keep = self.cross_rule_ac_keep_mask(event);
         let mut results = Vec::new();
         for idx in self.rule_index.candidates(event) {
