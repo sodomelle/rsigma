@@ -45,6 +45,14 @@ The streaming runtime (event sources, sinks, daemon plumbing, dynamic pipelines)
 
 No features. The parser is unconditional.
 
+## `rstix`
+
+STIX 2.1 + TAXII 2.1 library crate under phased implementation.
+
+| Feature | Default | Pulls in | What it enables |
+|---------|---------|----------|-----------------|
+| `serde` | yes | `serde` | Serialization and deserialization support (for example `SpecVersion`). |
+
 ## Building with features
 
 ### Cargo install

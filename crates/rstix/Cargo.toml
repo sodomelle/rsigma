@@ -1,0 +1,25 @@
+[package]
+name = "rstix"
+description = "STIX 2.1 + TAXII 2.1 library for Rust"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = ["serde"]
+
+serde = ["dep:serde"]
+
+[dependencies]
+phf = { version = "0.13", features = ["macros"] }
+serde_jcs = "0.2"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = "1"

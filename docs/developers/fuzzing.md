@@ -1,11 +1,11 @@
 # Fuzzing
 
-The workspace ships 15 [`cargo-fuzz`](https://rust-fuzz.github.io/book/cargo-fuzz.html) harnesses under `fuzz/fuzz_targets/`. The `Fuzz` GitHub Actions workflow runs them weekly (Monday 03:00 UTC) on `libFuzzer`; you can also invoke any single target locally.
+The workspace ships 15 [`cargo-fuzz`](https://rust-fuzz.github.io/book/cargo-fuzz.html) harnesses under `fuzz/fuzz_targets/`. The `Fuzz` GitHub Actions workflow runs 14 of them weekly (Monday 03:00 UTC) on `libFuzzer`; `fuzz_eval_matcher_diff` remains a manual differential target.
 
 ## Harness inventory
 
 | Target | Covers | Max input len in CI |
-|--------|--------|---------------------|
+| -------- | -------- | --------------------- |
 | `fuzz_parse_yaml` | The Sigma YAML parser (`parse_sigma_yaml`). | 8192 |
 | `fuzz_condition` | Condition-expression parser only. | 512 |
 | `fuzz_eval_matching` | Engine evaluation. Feeds parsed rules and constructed JSON events. | 65536 |
