@@ -1,8 +1,7 @@
 <p align="center">
     <a href="https://github.com/timescale/rsigma">
-        <img src="https://github.com/timescale/rsigma/blob/main/assets/rsigma-logo.png" alt="RSigma logo" width="120"/>
+        <img src="https://github.com/timescale/rsigma/blob/main/assets/rsigma-logotype.png" alt="RSigma logo" width="120"/>
     </a>
-    <h1 align="center">RSigma</h1>
     <p align="center">A complete Rust toolkit for the Sigma detection standard</p>
 </p>
 
