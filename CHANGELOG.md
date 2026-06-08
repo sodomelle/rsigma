@@ -5,7 +5,7 @@ Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma
 
 ## [Unreleased]
 
-### Strip the UTF-8 BOM from RFC 5424 syslog messages
+### Strip the UTF-8 BOM from RFC 5424 syslog messages (#187)
 
 RFC 5424 section 6.4 mandates that a UTF-8 `MSG` begin with a byte order mark (`U+FEFF`, bytes `EF BB BF`) as an encoding marker, not as content. `syslog_loose` preserves it verbatim, and `str::trim()` does not remove it (`U+FEFF` is not Unicode `White_Space`), so the BOM previously leaked into the parsed event: it corrupted the `_raw` field and anchored matchers (`startswith`, exact equality), and it blocked embedded-JSON detection because `serde_json` errors on a leading BOM, silently degrading a BOM-prefixed JSON payload to a key/value event.
 
