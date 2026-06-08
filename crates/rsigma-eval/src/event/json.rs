@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use rsigma_parser::fieldpath::{first_unescaped, unescape_brackets};
 use serde_json::Value;
 
 use super::{Event, EventValue};
@@ -51,8 +52,11 @@ impl<'a> Event for JsonEvent<'a> {
     /// Get a field value by name, supporting dot-notation for nested access.
     ///
     /// Checks for a flat key first (exact match), then falls back to
-    /// dot-separated traversal. When a path segment yields an array,
-    /// each element is tried and the first match is returned (OR semantics).
+    /// dot-separated traversal. When a path segment crosses an array, every
+    /// element is followed and all terminal values are collected: a single
+    /// hit is returned as-is, multiple hits are returned as an
+    /// [`EventValue::Array`] so the matcher applies any-member semantics
+    /// (rather than only testing the first element).
     fn get_field(&self, path: &str) -> Option<EventValue<'_>> {
         let value: &Value = &self.inner;
 
@@ -62,8 +66,15 @@ impl<'a> Event for JsonEvent<'a> {
             return Some(EventValue::from(v));
         }
 
-        if path.contains('.') {
-            return traverse_json(value, path).map(EventValue::from);
+        if path.contains('.') || path.contains('[') || path.contains('\\') {
+            let ops = parse_path_ops(path);
+            let mut collected: Vec<EventValue<'_>> = Vec::new();
+            collect_by_ops(value, &ops, &mut collected);
+            return match collected.len() {
+                0 => None,
+                1 => collected.pop(),
+                _ => Some(EventValue::Array(collected)),
+            };
         }
 
         None
@@ -109,52 +120,102 @@ impl<'a> Event for JsonEvent<'a> {
     }
 }
 
-/// Recursively traverse a JSON value following dot-notation path segments.
-///
-/// `path` is the remaining dot-joined path (e.g. `"actor.id.value"`); the
-/// function splits the leading segment on each recursion via
-/// [`str::split_once`] so no `Vec<&str>` is allocated. Each lookup was a
-/// hot path under `get_field`, called once per detection item per event;
-/// the previous `path.split('.').collect::<Vec<_>>()` allocated on every
-/// nested lookup.
-///
-/// When a segment resolves to an array, each element is tried with the
-/// same (unconsumed) `path`, matching the OR semantics of the prior
-/// implementation: the array does not consume a path segment.
-fn traverse_json<'a>(current: &'a Value, path: &str) -> Option<&'a Value> {
-    match current {
-        Value::Object(map) => {
-            // `split_once` consumes a single segment per recursion; the
-            // `has_more` flag distinguishes "the last segment, return the
-            // looked-up value" from "more segments to walk into". Treating
-            // an `is_empty()` path as terminal would change the
-            // pathological "trailing dot" case (`"a.b."`) from a miss to
-            // a hit, because consuming `b` would leave an empty rest that
-            // the old `Vec<&str>` walker tried to apply to the leaf
-            // value and bailed on; preserve that miss semantics here.
-            let (head, rest, has_more) = match path.split_once('.') {
-                Some((h, r)) => (h, r, true),
-                None => (path, "", false),
-            };
-            let next = map.get(head)?;
-            if has_more {
-                traverse_json(next, rest)
-            } else {
-                Some(next)
-            }
-        }
-        Value::Array(arr) => {
-            // Arrays do not consume a path segment; each element is
-            // tried with the full remaining path, matching the OR
-            // semantics of the prior `traverse_json(item, parts)` call.
-            for item in arr {
-                if let Some(v) = traverse_json(item, path) {
-                    return Some(v);
+/// A single field-path navigation step.
+enum PathOp<'a> {
+    /// Object key lookup (bracket-unescaped). Distributes over arrays (implicit
+    /// any-member).
+    Key(Cow<'a, str>),
+    /// Positional array index, possibly negative. Selects one element; never
+    /// fans out.
+    Index(i64),
+}
+
+/// Resolve a positional index against an array length. Negative indices count
+/// from the end (`-1` is the last element); out-of-range yields `None`.
+pub(crate) fn resolve_array_index(index: i64, len: usize) -> Option<usize> {
+    if index >= 0 {
+        usize::try_from(index).ok().filter(|&i| i < len)
+    } else {
+        usize::try_from(index.unsigned_abs())
+            .ok()
+            .and_then(|abs| len.checked_sub(abs))
+    }
+}
+
+/// Parse a dot path into navigation ops, recognizing positional `name[N]`
+/// (and chained `name[N][M]`, with negative indices counting from the end). A
+/// bracket group that is not an integer degrades to a literal object key so it
+/// simply fails to match.
+fn parse_path_ops(path: &str) -> Vec<PathOp<'_>> {
+    let mut ops = Vec::new();
+    for part in path.split('.') {
+        match first_unescaped(part, b'[') {
+            Some(bpos) if parse_index_groups(&part[bpos..]).is_some() => {
+                let name = &part[..bpos];
+                if !name.is_empty() {
+                    ops.push(PathOp::Key(unescape_brackets(name)));
+                }
+                for idx in parse_index_groups(&part[bpos..]).expect("checked") {
+                    ops.push(PathOp::Index(idx));
                 }
             }
-            None
+            // No unescaped index group: the whole segment is a literal key,
+            // with `\[` / `\]` unescaped to match the event's actual key.
+            _ => ops.push(PathOp::Key(unescape_brackets(part))),
         }
-        _ => None,
+    }
+    ops
+}
+
+/// Parse `[N]` or `[N][M]...` into the contained indices (negative allowed), or
+/// `None` if any group is malformed or non-numeric.
+fn parse_index_groups(s: &str) -> Option<Vec<i64>> {
+    let mut out = Vec::new();
+    let mut rem = s;
+    while !rem.is_empty() {
+        let rest = rem.strip_prefix('[')?;
+        let close = rest.find(']')?;
+        let idx: i64 = rest[..close].parse().ok()?;
+        out.push(idx);
+        rem = &rest[close + 1..];
+    }
+    Some(out)
+}
+
+/// Follow navigation ops, collecting every terminal value into `out`.
+///
+/// A `Key` op distributes over arrays (implicit any-member): the remaining ops
+/// are applied to every element, so a path crossing an array of objects yields
+/// one value per element. An `Index` op selects a single element and never
+/// fans out, giving deterministic positional access.
+fn collect_by_ops<'a>(current: &'a Value, ops: &[PathOp<'_>], out: &mut Vec<EventValue<'a>>) {
+    let Some((op, rest)) = ops.split_first() else {
+        out.push(EventValue::from(current));
+        return;
+    };
+
+    match op {
+        PathOp::Key(key) => match current {
+            Value::Object(map) => {
+                if let Some(next) = map.get(key.as_ref()) {
+                    collect_by_ops(next, rest, out);
+                }
+            }
+            Value::Array(arr) => {
+                for item in arr {
+                    collect_by_ops(item, ops, out);
+                }
+            }
+            _ => {}
+        },
+        PathOp::Index(i) => {
+            if let Value::Array(arr) = current
+                && let Some(idx) = resolve_array_index(*i, arr.len())
+                && let Some(next) = arr.get(idx)
+            {
+                collect_by_ops(next, rest, out);
+            }
+        }
     }
 }
 
@@ -270,11 +331,16 @@ mod tests {
 
     #[test]
     fn json_array_traversal() {
+        // A path crossing an array of objects now collects every element's
+        // leaf value (any-member semantics), not just the first.
         let v = json!({"a": {"b": [{"c": "found"}, {"c": "other"}]}});
         let event = JsonEvent::borrow(&v);
         assert_eq!(
             event.get_field("a.b.c"),
-            Some(EventValue::Str(Cow::Borrowed("found")))
+            Some(EventValue::Array(vec![
+                EventValue::Str(Cow::Borrowed("found")),
+                EventValue::Str(Cow::Borrowed("other")),
+            ]))
         );
     }
 
@@ -294,9 +360,14 @@ mod tests {
             ]
         });
         let event = JsonEvent::borrow(&v);
+        // Nested arrays flatten to every leaf value.
         assert_eq!(
             event.get_field("events.actors.name"),
-            Some(EventValue::Str(Cow::Borrowed("alice")))
+            Some(EventValue::Array(vec![
+                EventValue::Str(Cow::Borrowed("alice")),
+                EventValue::Str(Cow::Borrowed("bob")),
+                EventValue::Str(Cow::Borrowed("charlie")),
+            ]))
         );
     }
 
@@ -306,7 +377,10 @@ mod tests {
         let event = JsonEvent::borrow(&v);
         assert_eq!(
             event.get_field("process.command_line"),
-            Some(EventValue::Str(Cow::Borrowed("whoami")))
+            Some(EventValue::Array(vec![
+                EventValue::Str(Cow::Borrowed("whoami")),
+                EventValue::Str(Cow::Borrowed("id")),
+            ]))
         );
     }
 

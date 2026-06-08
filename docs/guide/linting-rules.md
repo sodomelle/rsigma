@@ -61,9 +61,9 @@ The lint rules are grouped by what part of a rule they inspect:
 |----------|------:|----------|
 | Infrastructure | 4 | `yaml_parse_error`, `not_a_mapping`, `file_read_error`, `schema_violation` |
 | Shared metadata | 16 | `missing_title`, `invalid_status`, `invalid_level`, `invalid_date`, `non_lowercase_key` |
-| Detection rules | 18 | `missing_detection`, `missing_condition`, `invalid_tag`, `duplicate_fields`, `deprecated_aggregation_syntax` |
+| Detection rules | 19 | `missing_detection`, `missing_condition`, `invalid_tag`, `duplicate_fields`, `deprecated_aggregation_syntax`, `flattened_array_correlation` |
 | Correlation rules | 13 | `missing_correlation_type`, `missing_correlation_timespan`, `invalid_correlation_type`, `missing_condition_field` |
-| Filter rules | 8 | `missing_filter_rules`, `missing_filter_selection`, `filter_has_level` |
+| Filter rules | 7 | `missing_filter_rules`, `missing_filter_selection`, `filter_has_level` |
 | Detection logic | 7 | `single_value_all_modifier`, `incompatible_modifiers`, `wildcard_only_value` |
 
 See the full catalog in [Lint Rules reference](../reference/lint-rules.md), with each rule documented with severity, description, example bad/good YAML, and auto-fix availability. The reference is the canonical place to look up a finding code.

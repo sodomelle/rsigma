@@ -477,6 +477,17 @@ fn collect_positive_substring_needles(
                 collect_positive_substring_needles(sub, out);
             }
         }
+        CompiledDetection::And(subs) => {
+            for sub in subs {
+                collect_positive_substring_needles(sub, out);
+            }
+        }
+        // Array object-scope predicates target member sub-fields, not
+        // top-level event fields, so they cannot contribute top-level needles.
+        // Leaving them out keeps the rule from being bloom-pruned.
+        CompiledDetection::ArrayMatch { .. } => {}
+        // Extended array body: member-scoped, no top-level needles.
+        CompiledDetection::Conditional { .. } => {}
         CompiledDetection::Keywords(_) => {
             // Keyword detections are field-less; not bloom-eligible at the
             // per-field granularity.

@@ -179,6 +179,22 @@ impl Collector {
                     self.collect_detection_items(sub, rule_title, source);
                 }
             }
+            Detection::ArrayMatch { field, body, .. } => {
+                // Report the array container field, then the member fields
+                // referenced inside the block.
+                self.add(field, rule_title, source);
+                self.collect_detection_items(body, rule_title, source);
+            }
+            Detection::And(subs) => {
+                for sub in subs {
+                    self.collect_detection_items(sub, rule_title, source);
+                }
+            }
+            Detection::Conditional { named, .. } => {
+                for sub in named.values() {
+                    self.collect_detection_items(sub, rule_title, source);
+                }
+            }
             Detection::Keywords(_) => {}
         }
     }

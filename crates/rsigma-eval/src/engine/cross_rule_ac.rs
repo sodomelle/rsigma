@@ -228,6 +228,16 @@ fn collect_rule_needles(
                 collect_rule_needles(sub, rule_idx, out);
             }
         }
+        CompiledDetection::And(subs) => {
+            for sub in subs {
+                collect_rule_needles(sub, rule_idx, out);
+            }
+        }
+        // Array object-scope predicates are on member sub-fields, not
+        // top-level fields, so they contribute no top-level needles.
+        CompiledDetection::ArrayMatch { .. } => {}
+        // Extended array body: member-scoped, contributes no top-level needles.
+        CompiledDetection::Conditional { .. } => {}
         CompiledDetection::Keywords(_) => {
             // Field-less; the cross-rule index is per-field so keywords are
             // out of scope. Phase 1's per-rule Aho-Corasick still handles
@@ -369,6 +379,12 @@ fn detection_is_pure_positive_substring(
         // Keywords are field-less and the cross-rule index is per-field, so
         // we conservatively reject keyword detections from AC pruning.
         CompiledDetection::Keywords(_) => false,
+        // Array object-scope matching is not a top-level positive substring
+        // assertion, so rules using it are never eligible for cross-rule AC
+        // pruning (they are always evaluated).
+        CompiledDetection::ArrayMatch { .. }
+        | CompiledDetection::And(_)
+        | CompiledDetection::Conditional { .. } => false,
     }
 }
 

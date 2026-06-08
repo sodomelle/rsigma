@@ -138,6 +138,7 @@ impl CompiledMatcher {
                     "false" | "0" | "no" => !*expected,
                     _ => false,
                 },
+                EventValue::Array(arr) => arr.iter().any(|v| self.matches(v, event)),
                 _ => false,
             },
 
@@ -158,6 +159,9 @@ impl CompiledMatcher {
 
             // -- Timestamp --
             CompiledMatcher::TimestampPart { part, inner } => {
+                if let EventValue::Array(arr) = value {
+                    return arr.iter().any(|v| self.matches(v, event));
+                }
                 match extract_timestamp_part(value, *part) {
                     Some(n) => {
                         let num_val = EventValue::Int(n);

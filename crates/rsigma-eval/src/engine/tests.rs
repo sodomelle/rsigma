@@ -1412,3 +1412,601 @@ detection:
         }
     }
 }
+
+// =============================================================================
+// Array matching (object-scope quantifier blocks + implicit any-member)
+// =============================================================================
+
+/// Whether a rule matches an event value.
+fn matches(engine: &Engine, ev: &serde_json::Value) -> bool {
+    !engine.evaluate(&JsonEvent::borrow(ev)).is_empty()
+}
+
+#[test]
+fn array_implicit_any_flat_scalar_array() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections: '123.1.1.1'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"connections": ["123.1.2.2", "123.1.1.1", "123.3.3.3"]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"connections": ["10.0.0.1", "10.0.0.2"]})
+    ));
+}
+
+#[test]
+fn array_implicit_any_through_object_array_fans_out() {
+    // Regression for the first-match-wins traversal bug: the matching element
+    // is NOT first, so this only passes with full fan-out.
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections.ip: '123.1.1.1'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"connections": [{"ip": "10.0.0.1"}, {"ip": "123.1.1.1"}]})
+    ));
+}
+
+#[test]
+fn array_object_scope_any_correlates_same_element() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[any]:
+            protocol: 'TCP'
+            ip|cidr: '123.1.0.0/16'
+    condition: selection
+"#,
+    );
+    // One element is both TCP and in-CIDR -> match.
+    assert!(matches(
+        &engine,
+        &json!({"connections": [
+            {"protocol": "UDP", "ip": "123.1.5.5"},
+            {"protocol": "TCP", "ip": "123.1.9.9"}
+        ]})
+    ));
+    // TCP and in-CIDR exist, but on DIFFERENT elements -> no match
+    // (this is the property the flattened form cannot express).
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [
+            {"protocol": "TCP", "ip": "10.0.0.1"},
+            {"protocol": "UDP", "ip": "123.1.9.9"}
+        ]})
+    ));
+}
+
+#[test]
+fn array_object_scope_all_requires_every_member_and_nonempty() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[all]:
+            protocol: 'TCP'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"connections": [{"protocol": "TCP"}, {"protocol": "TCP"}]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [{"protocol": "TCP"}, {"protocol": "UDP"}]})
+    ));
+    // Empty / missing array must not match `all`.
+    assert!(!matches(&engine, &json!({"connections": []})));
+    assert!(!matches(&engine, &json!({"other": 1})));
+}
+
+#[test]
+fn array_scalar_member_all_with_modifier() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        ips[all]|startswith: '123.'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"ips": ["123.1.1.1", "123.9.9.9"]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"ips": ["123.1.1.1", "10.0.0.1"]})
+    ));
+}
+
+#[test]
+fn array_nested_quantifiers() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        rules[any]:
+            type: 'allow'
+            ip[all]|startswith: '123.1.1'
+    condition: selection
+"#,
+    );
+    // There is an allow rule whose ip array members all start with 123.1.1.
+    assert!(matches(
+        &engine,
+        &json!({"rules": [
+            {"type": "block", "ip": ["124.0.0.1"]},
+            {"type": "allow", "ip": ["123.1.1.2", "123.1.1.3"]}
+        ]})
+    ));
+    // The allow rule has a non-conforming ip -> no match.
+    assert!(!matches(
+        &engine,
+        &json!({"rules": [
+            {"type": "allow", "ip": ["123.1.1.2", "10.0.0.1"]}
+        ]})
+    ));
+}
+
+#[test]
+fn array_mixed_map_and_semantics() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        eventName: 'AuthorizeSecurityGroupIngress'
+        ipPermissions[any]:
+            ipRanges|contains: '0.0.0.0/0'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({
+            "eventName": "AuthorizeSecurityGroupIngress",
+            "ipPermissions": [{"ipRanges": "0.0.0.0/0"}]
+        })
+    ));
+    // Array matches but the sibling scalar does not -> AND fails.
+    assert!(!matches(
+        &engine,
+        &json!({
+            "eventName": "RunInstances",
+            "ipPermissions": [{"ipRanges": "0.0.0.0/0"}]
+        })
+    ));
+}
+
+#[test]
+fn array_okta_scopes_cloud_shape() {
+    let engine = make_engine_with_rule(
+        r#"
+title: Okta high-priv scope grant
+logsource: { product: okta, service: system }
+detection:
+    selection:
+        target[any]:
+            type: 'PUBLIC_CLIENT_APP'
+            scopes|contains: 'okta.users.manage'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"target": [
+            {"type": "USER", "scopes": "okta.users.read"},
+            {"type": "PUBLIC_CLIENT_APP", "scopes": "okta.users.manage okta.apps.read"}
+        ]})
+    ));
+}
+
+#[test]
+fn array_positional_index_scalar() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        args[0]|endswith: '\powershell.exe'
+        args[1]: '-enc'
+    condition: selection
+"#,
+    );
+    // Positional disambiguation: image at [0], first parameter at [1].
+    assert!(matches(
+        &engine,
+        &json!({"args": ["C:\\Windows\\System32\\powershell.exe", "-enc", "ZQ=="]})
+    ));
+    // '-enc' present but NOT at index 1 -> no match (index is exact, not any).
+    assert!(!matches(
+        &engine,
+        &json!({"args": ["C:\\Windows\\System32\\powershell.exe", "-noprofile", "-enc"]})
+    ));
+}
+
+#[test]
+fn array_positional_index_does_not_fan_out() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        ips[0]: '10.0.0.1'
+    condition: selection
+"#,
+    );
+    assert!(matches(&engine, &json!({"ips": ["10.0.0.1", "8.8.8.8"]})));
+    // 10.0.0.1 present but at index 1, not 0 -> no match.
+    assert!(!matches(&engine, &json!({"ips": ["8.8.8.8", "10.0.0.1"]})));
+    // Out of range / non-array -> no match.
+    assert!(!matches(&engine, &json!({"ips": []})));
+    assert!(!matches(&engine, &json!({"ips": "10.0.0.1"})));
+}
+
+#[test]
+fn array_positional_index_dotted_path() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[0].ip|cidr: '10.0.0.0/8'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"connections": [{"ip": "10.1.2.3"}, {"ip": "192.168.1.1"}]})
+    ));
+    // The in-CIDR ip is at index 1, not 0 -> no match.
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [{"ip": "192.168.1.1"}, {"ip": "10.1.2.3"}]})
+    ));
+}
+
+#[test]
+fn array_escaped_brackets_match_literal_field() {
+    // `args\[0\]` matches a field literally named "args[0]", not index 0 of an
+    // `args` array.
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        args\[0\]: 'cmd.exe'
+    condition: selection
+"#,
+    );
+    // Literal field present -> match.
+    assert!(matches(&engine, &json!({"args[0]": "cmd.exe"})));
+    // An `args` array does NOT satisfy the escaped (literal) field.
+    assert!(!matches(&engine, &json!({"args": ["cmd.exe", "x"]})));
+}
+
+#[test]
+fn array_negative_index_counts_from_end() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        args[-1]: '-enc'
+    condition: selection
+"#,
+    );
+    // -1 is the last element.
+    assert!(matches(
+        &engine,
+        &json!({"args": ["powershell.exe", "-noprofile", "-enc"]})
+    ));
+    // '-enc' present but not last -> no match (index is exact).
+    assert!(!matches(
+        &engine,
+        &json!({"args": ["powershell.exe", "-enc", "ZQ=="]})
+    ));
+    // Out of range (|index| > len) and non-array -> no match.
+    assert!(!matches(&engine, &json!({"args": []})));
+    assert!(!matches(&engine, &json!({"args": "-enc"})));
+}
+
+#[test]
+fn array_negative_index_dotted_path() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        events[-1].action: 'delete'
+    condition: selection
+"#,
+    );
+    // The last event's action is what matters.
+    assert!(matches(
+        &engine,
+        &json!({"events": [{"action": "create"}, {"action": "delete"}]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"events": [{"action": "delete"}, {"action": "create"}]})
+    ));
+}
+
+#[test]
+fn array_index_inside_quantifier() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        rules[any].ip[0]: '10.0.0.1'
+    condition: selection
+"#,
+    );
+    // Some rule whose FIRST ip is 10.0.0.1.
+    assert!(matches(
+        &engine,
+        &json!({"rules": [
+            {"ip": ["8.8.8.8"]},
+            {"ip": ["10.0.0.1", "1.1.1.1"]}
+        ]})
+    ));
+    // 10.0.0.1 appears, but never at index 0 -> no match.
+    assert!(!matches(
+        &engine,
+        &json!({"rules": [{"ip": ["8.8.8.8", "10.0.0.1"]}]})
+    ));
+}
+
+#[test]
+fn array_object_scope_none_is_dual_of_any() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        containers[none]:
+            image|startswith: 'evil/'
+    condition: selection
+"#,
+    );
+    // No container runs an evil image -> match.
+    assert!(matches(
+        &engine,
+        &json!({"containers": [{"image": "nginx"}, {"image": "redis"}]})
+    ));
+    // One container runs an evil image -> no match.
+    assert!(!matches(
+        &engine,
+        &json!({"containers": [{"image": "nginx"}, {"image": "evil/miner"}]})
+    ));
+    // An empty or missing array matches `none` (no member satisfies the body).
+    assert!(matches(&engine, &json!({"containers": []})));
+    assert!(matches(&engine, &json!({"other": 1})));
+}
+
+#[test]
+fn array_object_scope_all_or_empty_matches_empty() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[all_or_empty]:
+            protocol: 'TCP'
+    condition: selection
+"#,
+    );
+    // Like `all` when non-empty: every member must satisfy.
+    assert!(matches(
+        &engine,
+        &json!({"connections": [{"protocol": "TCP"}, {"protocol": "TCP"}]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [{"protocol": "TCP"}, {"protocol": "UDP"}]})
+    ));
+    // Unlike `all`, an empty or missing array matches (vacuously true).
+    assert!(matches(&engine, &json!({"connections": []})));
+    assert!(matches(&engine, &json!({"other": 1})));
+}
+
+#[test]
+fn array_extended_block_per_element_negation() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        connections[any]:
+            condition: in_cidr and not is_tcp
+            in_cidr:
+                ip|cidr: '123.1.0.0/16'
+            is_tcp:
+                protocol: 'TCP'
+    condition: selection
+"#,
+    );
+    // One element is in-CIDR and UDP (not TCP) -> match.
+    assert!(matches(
+        &engine,
+        &json!({"connections": [
+            {"protocol": "TCP", "ip": "10.0.0.1"},
+            {"protocol": "UDP", "ip": "123.1.9.9"}
+        ]})
+    ));
+    // In-CIDR only on the TCP element; the UDP element is out of CIDR. No
+    // single element is both in-CIDR and non-TCP -> no match (per-element bind).
+    assert!(!matches(
+        &engine,
+        &json!({"connections": [
+            {"protocol": "TCP", "ip": "123.1.9.9"},
+            {"protocol": "UDP", "ip": "10.0.0.1"}
+        ]})
+    ));
+}
+
+#[test]
+fn array_extended_block_per_element_disjunction() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        events[any]:
+            condition: is_delete or is_drop
+            is_delete:
+                action: 'delete'
+            is_drop:
+                action: 'drop'
+    condition: selection
+"#,
+    );
+    assert!(matches(
+        &engine,
+        &json!({"events": [{"action": "create"}, {"action": "drop"}]})
+    ));
+    assert!(!matches(
+        &engine,
+        &json!({"events": [{"action": "create"}, {"action": "update"}]})
+    ));
+}
+
+#[test]
+fn array_extended_block_all_quantifier() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        mounts[all]:
+            condition: readonly and not is_proc
+            readonly:
+                mode: 'ro'
+            is_proc:
+                path|startswith: '/proc'
+    condition: selection
+"#,
+    );
+    // Every mount is read-only and none under /proc -> match.
+    assert!(matches(
+        &engine,
+        &json!({"mounts": [
+            {"mode": "ro", "path": "/data"},
+            {"mode": "ro", "path": "/etc"}
+        ]})
+    ));
+    // One mount is read-write -> no match (all required).
+    assert!(!matches(
+        &engine,
+        &json!({"mounts": [
+            {"mode": "ro", "path": "/data"},
+            {"mode": "rw", "path": "/etc"}
+        ]})
+    ));
+}
+
+#[test]
+fn array_extended_block_scalar_element_marker() {
+    // `.` references the current scalar member inside an extended block body:
+    // "any 5xx response code that is not 504".
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        rcodes[any]:
+            condition: server_error and not gateway_timeout
+            server_error:
+                .|gte: 500
+                .|lte: 599
+            gateway_timeout:
+                .: 504
+    condition: selection
+"#,
+    );
+    assert!(matches(&engine, &json!({"rcodes": [502, 504, 200]})));
+    // Only a 504 and a non-5xx -> no element is a 5xx that is not 504.
+    assert!(!matches(&engine, &json!({"rcodes": [504, 200]})));
+    assert!(matches(&engine, &json!({"rcodes": [503]})));
+    assert!(!matches(&engine, &json!({"rcodes": [200, 301]})));
+}
+
+#[test]
+fn array_scalar_element_marker_basic_block() {
+    // `.` in a basic block: every member satisfies the predicate.
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        ports[all]:
+            .|gte: 1024
+    condition: selection
+"#,
+    );
+    assert!(matches(&engine, &json!({"ports": [1080, 8443]})));
+    assert!(!matches(&engine, &json!({"ports": [1080, 80]})));
+}
+
+#[test]
+fn array_scalar_member_none() {
+    let engine = make_engine_with_rule(
+        r#"
+title: T
+logsource: { category: test }
+detection:
+    selection:
+        tags[none]: 'admin'
+    condition: selection
+"#,
+    );
+    assert!(matches(&engine, &json!({"tags": ["user", "guest"]})));
+    assert!(!matches(&engine, &json!({"tags": ["user", "admin"]})));
+    assert!(matches(&engine, &json!({"tags": []})));
+    assert!(matches(&engine, &json!({"other": 1})));
+}

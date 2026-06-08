@@ -1,6 +1,6 @@
 # Lint Rules
 
-`rsigma rule lint` runs 65 built-in checks derived from the Sigma v2.1.0 specification, plus 1 reserved enum value (`empty_filter_rules`) that no production code currently emits. This page is the canonical catalogue: every rule's ID, default severity, what it flags, and whether `--fix` can auto-correct it.
+`rsigma rule lint` runs 66 built-in checks derived from the Sigma v2.1.0 specification, plus 1 reserved enum value (`empty_filter_rules`) that no production code currently emits. This page is the canonical catalogue: every rule's ID, default severity, what it flags, and whether `--fix` can auto-correct it.
 
 For the workflow and CLI surface see [Linting Rules](../guide/linting-rules.md) and the [`rule lint` CLI reference](../cli/rule/lint.md). For the source of truth see [`crates/rsigma-parser/src/lint`](https://github.com/timescale/rsigma/tree/main/crates/rsigma-parser/src/lint).
 
@@ -20,11 +20,11 @@ Override the threshold with `--fail-level warning` or `--fail-level info`. See [
 | Severity | Rules |
 |----------|------:|
 | `error` | 33 |
-| `warning` | 29 |
+| `warning` | 30 |
 | `info` | 3 |
 | `hint` | 0 |
 | Reserved (no production emission yet) | 1 |
-| **Total** | **66** (13 of which have safe auto-fixes via `--fix`) |
+| **Total** | **67** (13 of which have safe auto-fixes via `--fix`) |
 
 The `hint` severity is defined but not yet used by any of the shipped rules. Future rules may use it.
 
@@ -80,7 +80,7 @@ Apply to detection, correlation, and filter rules alike.
 | `non_lowercase_key` | `warning` | yes | A top-level key uses non-lowercase characters (e.g. `Title:` instead of `title:`). The fix lowercases the key. |
 | `unknown_key` | `info` | yes | An unrecognised top-level key. The fix suggests the closest known key when the edit distance is small (e.g. `descirption` → `description`). |
 
-## Detection rules (18)
+## Detection rules (19)
 
 Apply to detection rules (`detection:` block + `condition:`).
 
@@ -104,6 +104,7 @@ Apply to detection rules (`detection:` block + `condition:`).
 | `empty_value_list` | `warning` | — | A detection item with a list value is empty. |
 | `condition_references_unknown` | `error` | — | The `condition:` expression references a selection name that is not in `detection:`. |
 | `deprecated_aggregation_syntax` | `warning` | — | The condition uses the deprecated aggregation pipe syntax (`condition: selection \| count() > 5`). Use the modern `correlation:` block instead. |
+| `flattened_array_correlation` | `warning` | — | Two or more sibling keys share a quantified array prefix (e.g. `connections[any].protocol` and `connections[any].ip`). Each opens an independent scope, so they do **not** correlate on the same array element. Use an object-scope block (`connections[any]:` with the fields nested) to require one element to satisfy all of them. See [Array Matching](../guide/array-matching.md). |
 
 ## Correlation rules (13)
 
@@ -140,9 +141,9 @@ Apply to filter rules (`kind: filter` with a `filter:` block). The eighth row (`
 | `filter_has_status` | `warning` | yes | Filter rules should not carry `status:`. The fix removes the field. |
 | `empty_filter_rules` | reserved | — | Variant declared in the enum and asserted in a regression test, but no production code emits it today. May be repurposed in a future release. |
 
-## Detection-modifier hygiene (7)
+## Modifier and `related:` hygiene (7)
 
-Grouped here because they all flag modifier misuses on a specific detection item; none of these IDs also appear in the detection section above.
+These also apply to detection rules but sit apart from the core detection-block checks above: modifier-misuse checks on a single detection item (`single_value_all_modifier`, `all_with_re`, `incompatible_modifiers`) and validation of the `related:` cross-reference block.
 
 | Rule | Severity | Fix | Description |
 |------|----------|-----|-------------|

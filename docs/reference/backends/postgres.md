@@ -137,6 +137,53 @@ data->'actor'->'detail'->>'alternateId'
 
 Each path segment is validated against the SQL identifier regex (`^[A-Za-z_][A-Za-z0-9_$]*$`) before insertion; malformed segments fail conversion. Single quotes inside path segments are doubled (`don''t`). See [Security Hardening](../security.md#sql-injection-prevention).
 
+### Array matching
+
+In JSONB mode the backend lowers the experimental [array matching](../../guide/array-matching.md) constructs:
+
+- **Positional index** `field[N]` emits `->n` / `->>n`. Negative indices use PostgreSQL's native negative subscripts (`->-1`, PG 11+):
+
+```sql
+-- Sigma field: args[0]
+data->'args'->>0
+-- Sigma field: args[-1]  (last element)
+data->'args'->>-1
+```
+
+- **Object-scope blocks** `field[any]:` / `field[all]:` emit an `EXISTS` over `jsonb_array_elements`, guarded by `jsonb_typeof(...) = 'array'`:
+
+```sql
+-- connections[any]: { protocol: TCP, ip|cidr: 123.1.0.0/16 }
+(jsonb_typeof(data->'connections') = 'array' AND EXISTS (
+  SELECT 1 FROM jsonb_array_elements(data->'connections') AS __sigma_e0
+  WHERE __sigma_e0->>'protocol' = 'TCP'
+    AND (__sigma_e0->>'ip')::inet <<= '123.1.0.0/16'::cidr))
+```
+
+`[all]` adds a non-empty guard and `NOT EXISTS (... WHERE NOT (...))`. Because `[none]` and `[all_or_empty]` must match an empty or missing array, they lower to a `CASE` that only unnests an actual array and treats a missing/null value as a match:
+
+```sql
+-- containers[none]: { privileged: 'true' }
+(CASE WHEN jsonb_typeof(data->'containers') = 'array'
+  THEN NOT EXISTS (SELECT 1 FROM jsonb_array_elements(data->'containers') AS __sigma_e0
+    WHERE __sigma_e0->>'privileged' = 'true')
+  ELSE data->'containers' IS NULL OR jsonb_typeof(data->'containers') = 'null' END)
+```
+
+`[all_or_empty]` uses the same shape with `WHERE NOT (...)`.
+
+An **extended** block body (a `condition:` plus named element-scoped sub-selections) lowers to the same primitive, with the condition compiled into the inner predicate as a boolean expression over the element (`OR`, and a parenthesized `NOT`):
+
+```sql
+-- connections[any]: { condition: in_cidr and not is_tcp, in_cidr: {ip|cidr: ...}, is_tcp: {protocol: TCP} }
+(jsonb_typeof(data->'connections') = 'array' AND EXISTS (
+  SELECT 1 FROM jsonb_array_elements(data->'connections') AS __sigma_e0
+  WHERE (__sigma_e0->>'ip')::inet <<= '123.1.0.0/16'::cidr
+    AND NOT (__sigma_e0->>'protocol' = 'TCP')))
+```
+
+Array matching requires JSONB mode; in flat-column mode the backend reports `UnsupportedArrayMatching`.
+
 ## Correlation rules
 
 The backend handles every aggregation type:

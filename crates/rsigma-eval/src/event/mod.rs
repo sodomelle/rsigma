@@ -13,6 +13,7 @@ mod map;
 mod plain;
 
 pub use json::JsonEvent;
+pub(crate) use json::resolve_array_index;
 pub use kv::KvEvent;
 pub use map::MapEvent;
 pub use plain::PlainEvent;
