@@ -66,7 +66,7 @@ impl<'a> Event for JsonEvent<'a> {
             return traverse_json(value, path).map(EventValue::from);
         }
 
-        None
+        find_key_deep(value, path).map(EventValue::from)
     }
 
     /// Check if any string value in the event satisfies a predicate.
@@ -108,6 +108,19 @@ impl<'a> Event for JsonEvent<'a> {
         out
     }
 }
+
+fn find_key_deep<'a>(current: &'a Value, key: &str) -> Option<&'a Value> {
+      match current {
+          Value::Object(map) => {
+              if let Some(v) = map.get(key) {
+                  return Some(v);
+              }
+              map.values().find_map(|v| find_key_deep(v, key))
+          }
+          Value::Array(arr) => arr.iter().find_map(|v| find_key_deep(v, key)),
+          _ => None,
+      }
+  }
 
 /// Recursively traverse a JSON value following dot-notation path segments.
 ///
