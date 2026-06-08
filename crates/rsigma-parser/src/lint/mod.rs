@@ -137,6 +137,8 @@ pub enum LintRule {
     EmptyValueList,
     WildcardOnlyValue,
     FlattenedArrayCorrelation,
+    UnsupportedSigmaVersion,
+    ArrayMatchingWithoutVersion,
     UnknownKey,
 }
 
@@ -209,6 +211,8 @@ impl fmt::Display for LintRule {
             LintRule::EmptyValueList => "empty_value_list",
             LintRule::WildcardOnlyValue => "wildcard_only_value",
             LintRule::FlattenedArrayCorrelation => "flattened_array_correlation",
+            LintRule::UnsupportedSigmaVersion => "unsupported_sigma_version",
+            LintRule::ArrayMatchingWithoutVersion => "array_matching_without_version",
             LintRule::UnknownKey => "unknown_key",
         };
         write!(f, "{s}")
@@ -345,6 +349,7 @@ static KEY_CACHE: LazyLock<HashMap<&'static str, Value>> = LazyLock::new(|| {
         "scope",
         "selection",
         "service",
+        "sigma-version",
         "status",
         "tags",
         "taxonomy",
@@ -527,6 +532,7 @@ fn lint_yaml_value_ext(value: &Value, extra_ns: &[String]) -> Vec<LintWarning> {
         DocType::Filter => rules::filter::lint_filter_rule(m, &mut warnings),
     }
 
+    rules::version::lint_sigma_version(m, doc_type, &mut warnings);
     rules::shared::lint_unknown_keys(m, doc_type, &mut warnings);
 
     warnings
