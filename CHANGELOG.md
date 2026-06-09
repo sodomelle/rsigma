@@ -4,7 +4,7 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
-### Fibratus conversion backend
+### Fibratus conversion backend (#191)
 
 Convert Sigma rules into rule YAML for [Fibratus](https://github.com/rabbitstack/fibratus), an Apache-2.0 Windows kernel-event detection and EDR engine. Fibratus is the first conversion target aimed at an endpoint sensor rather than a centralized log store; rules emitted by `rsigma backend convert -t fibratus` drop into a Fibratus installation's `Rules/` directory and load with the same parser as the upstream rules library.
 
