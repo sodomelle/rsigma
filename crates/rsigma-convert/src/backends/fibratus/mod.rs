@@ -632,10 +632,21 @@ impl Backend for FibratusBackend {
         _state: &ConversionState,
         output_format: &str,
     ) -> Result<String> {
+        // Apply macro recognition before envelope wrapping so the
+        // YAML `condition:` block carries idiomatic macro calls
+        // (`spawn_process`, `open_file`, ...) instead of the raw
+        // `evt.name imatches '...'` clauses. The recognizer is a
+        // no-op on inputs that match no macros, so callers that
+        // disable `use_macros` get byte-equivalent output.
+        let condition = if self.fibratus.use_macros {
+            macros::recognize(&query)
+        } else {
+            query
+        };
         match output_format {
-            "expr" => Ok(query),
+            "expr" => Ok(condition),
             "default" | "yaml" | "rule" => {
-                Ok(envelope::render_rule_yaml(rule, &query, &self.fibratus))
+                Ok(envelope::render_rule_yaml(rule, &condition, &self.fibratus))
             }
             other => Err(ConvertError::RuleConversion(format!(
                 "unknown output format: {other}"

@@ -1,74 +1,41 @@
-//! Fibratus macro library, used by Phase 3 to rewrite recognized condition
-//! AST sub-trees into idiomatic macro calls (`spawn_process`, `open_file`,
-//! `modify_registry`, ...).
+//! Fibratus macro library and AST-output recognition pass.
 //!
-//! The expression text on the right of each entry is the canonical form
-//! upstream ships in [`rules/macros/macros.yml`](https://github.com/rabbitstack/fibratus/blob/master/rules/macros/macros.yml).
-//! Recognition compares parsed [`rsigma_parser::ConditionExpr`] sub-trees
-//! against the parsed AST of these strings, so whitespace and operand
-//! ordering on the rendered query do not affect matching.
+//! Each entry pairs a macro name with the **clause sequence** the
+//! Fibratus backend would emit if a user wrote the macro's expansion
+//! verbatim in a Sigma rule. After the backend builds a rule's full
+//! condition string, [`recognize`] walks the top-level `and` clauses
+//! and replaces any contiguous run that matches a macro's clause
+//! sequence with the macro name, so the rendered output reads like
+//! the upstream [Fibratus rules library](https://github.com/rabbitstack/fibratus/tree/master/rules)
+//! (`spawn_process and ps.exe iendswith '\\cmd.exe'` rather than
+//! `evt.name imatches 'CreateProcess' and ps.exe iendswith '\\cmd.exe'`).
+//!
+//! Both operator forms are accepted at recognition time so that
+//! `-O case_sensitive=true` (which emits `evt.name = 'CreateProcess'`)
+//! still matches the same macros as the default
+//! (`evt.name imatches 'CreateProcess'`).
 
-/// Macro entry: `(macro_name, canonical_expression_text)`.
+use std::sync::LazyLock;
+
+// =============================================================================
+// Macro source table
+// =============================================================================
+
+/// Macro source entries: `(macro_name, upstream_canonical_expression)`.
 ///
-/// Only the leaves that reduce to a single boolean expression are listed
-/// here. List-style macros (e.g. `msoffice_binaries`, `script_interpreters`)
-/// are emitted by their literal name when an in-list comparison happens to
-/// match the same value sequence; that is handled in Phase 3 with a
-/// separate list-recognition pass.
+/// Kept as documentation of the original Fibratus macro library; the
+/// recognition pass works off the rendered output forms in
+/// [`MACRO_CLAUSES`] (derived from these at startup).
 pub const EXPRESSION_MACROS: &[(&str, &str)] = &[
     ("spawn_process", "evt.name = 'CreateProcess'"),
     ("create_thread", "evt.name = 'CreateThread'"),
-    (
-        "create_remote_thread",
-        "evt.name = 'CreateThread' and evt.pid != 4 and evt.pid != thread.pid",
-    ),
-    (
-        "open_process",
-        "evt.name = 'OpenProcess' and ps.access.status = 'Success'",
-    ),
-    (
-        "open_thread",
-        "evt.name = 'OpenThread' and thread.access.status = 'Success'",
-    ),
     ("write_file", "evt.name = 'WriteFile'"),
-    (
-        "open_file",
-        "evt.name = 'CreateFile' and file.operation = 'OPEN' and file.status = 'Success'",
-    ),
-    (
-        "create_file",
-        "evt.name = 'CreateFile' and file.operation != 'OPEN' and file.status = 'Success'",
-    ),
-    (
-        "create_new_file",
-        "evt.name = 'CreateFile' and file.operation = 'CREATE' and file.status = 'Success'",
-    ),
-    (
-        "create_file_supersede",
-        "evt.name = 'CreateFile' and file.operation = 'SUPERSEDE'",
-    ),
     ("rename_file", "evt.name = 'RenameFile'"),
     ("read_file", "evt.name = 'ReadFile'"),
     ("delete_file", "evt.name = 'DeleteFile'"),
     ("set_file_information", "evt.name = 'SetFileInformation'"),
-    (
-        "query_registry",
-        "evt.name in ('RegQueryKey', 'RegQueryValue') and registry.status = 'Success'",
-    ),
-    (
-        "open_registry",
-        "evt.name = 'RegOpenKey' and registry.status = 'Success'",
-    ),
     ("load_module", "evt.name = 'LoadModule'"),
     ("unload_module", "evt.name = 'UnloadModule'"),
-    (
-        "set_value",
-        "evt.name = 'RegSetValue' and registry.status = 'Success'",
-    ),
-    (
-        "create_key",
-        "evt.name = 'RegCreateKey' and registry.status = 'Success'",
-    ),
     ("send_socket", "evt.name = 'Send'"),
     ("recv_socket", "evt.name = 'Recv'"),
     ("connect_socket", "evt.name = 'Connect'"),
@@ -81,15 +48,301 @@ pub const EXPRESSION_MACROS: &[(&str, &str)] = &[
     ("create_handle", "evt.name = 'CreateHandle'"),
     ("query_dns", "evt.name = 'QueryDns'"),
     ("reply_dns", "evt.name = 'ReplyDns'"),
+    // Multi-clause macros, matched as contiguous clause runs.
+    (
+        "open_file",
+        "evt.name = 'CreateFile' and file.operation = 'OPEN' and file.status = 'Success'",
+    ),
+    (
+        "create_new_file",
+        "evt.name = 'CreateFile' and file.operation = 'CREATE' and file.status = 'Success'",
+    ),
+    (
+        "create_file_supersede",
+        "evt.name = 'CreateFile' and file.operation = 'SUPERSEDE'",
+    ),
+    (
+        "set_value",
+        "evt.name = 'RegSetValue' and registry.status = 'Success'",
+    ),
+    (
+        "create_key",
+        "evt.name = 'RegCreateKey' and registry.status = 'Success'",
+    ),
+    (
+        "open_process",
+        "evt.name = 'OpenProcess' and ps.access.status = 'Success'",
+    ),
+    (
+        "open_thread",
+        "evt.name = 'OpenThread' and thread.access.status = 'Success'",
+    ),
+    (
+        "open_registry",
+        "evt.name = 'RegOpenKey' and registry.status = 'Success'",
+    ),
 ];
+
+/// One macro's pre-rendered clause sequences in both operator forms.
+///
+/// Stored as `(macro_name, default_form_clauses, cased_form_clauses)`:
+/// `default_form_clauses` is what the backend emits with the default
+/// case-insensitive operators (`evt.name imatches 'CreateProcess'`);
+/// `cased_form_clauses` is what the backend emits with
+/// `-O case_sensitive=true` (`evt.name = 'CreateProcess'`).
+type MacroClauses = (&'static str, Vec<String>, Vec<String>);
+
+/// Pre-rendered macro clauses, derived from [`EXPRESSION_MACROS`] at
+/// first access via [`LazyLock`]. The recognizer compares
+/// clause-by-clause against either form, so a rule that mixes cased
+/// and default operators across separate macros still recognizes each
+/// one independently.
+static MACRO_CLAUSES: LazyLock<Vec<MacroClauses>> = LazyLock::new(|| {
+    EXPRESSION_MACROS
+        .iter()
+        .map(|(name, src)| {
+            let cased: Vec<String> = split_clauses(src).into_iter().map(str::to_string).collect();
+            let default: Vec<String> = cased.iter().map(|c| to_imatches(c)).collect();
+            (*name, default, cased)
+        })
+        .collect()
+});
 
 /// Macro name lookup: is this name a known Fibratus expression macro?
 ///
-/// Used to avoid emitting collisions when a user's detection name happens
-/// to share a macro identifier.
+/// Used by the macro recognizer and by future linters to avoid
+/// emitting collisions when a detection name happens to share a
+/// macro identifier.
 pub fn is_known_macro(name: &str) -> bool {
     EXPRESSION_MACROS.iter().any(|(n, _)| *n == name)
 }
+
+// =============================================================================
+// Recognition pass
+// =============================================================================
+
+/// Rewrite a Fibratus filter expression so recognized macro clause
+/// runs are replaced with the macro name (`spawn_process`,
+/// `open_file`, `modify_registry`, ...). The input is the bare
+/// condition string the backend's `convert_condition` walk produces;
+/// the output is the same expression with longer-prefix-first greedy
+/// macro substitutions applied across the top-level `and` clauses.
+///
+/// The recognizer never reorders clauses, never crosses an `or` /
+/// parenthesis boundary, and never splits operands of a single
+/// clause. A clause that does not exactly match any macro stays
+/// verbatim, so the output is byte-equivalent to the input whenever
+/// no macro applies.
+pub fn recognize(condition: &str) -> String {
+    if condition.is_empty() {
+        return String::new();
+    }
+    let clauses = split_top_level_and(condition);
+    if clauses.len() < 2 && !clauses.first().is_some_and(|c| matches_any_macro(c)) {
+        // Single bare clause that does not match any macro: shortcut.
+        return condition.to_string();
+    }
+
+    // Sort macros by descending clause count so the longest-prefix
+    // match wins (`open_file` over the bare `create_file_supersede`
+    // when the condition carries the full three-clause sequence).
+    let mut macros: Vec<&MacroClauses> = MACRO_CLAUSES.iter().collect();
+    macros.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+    let mut out: Vec<String> = Vec::with_capacity(clauses.len());
+    let mut i = 0;
+    while i < clauses.len() {
+        let mut matched = None;
+        for (name, default_clauses, cased_clauses) in &macros {
+            let len = default_clauses.len();
+            if i + len > clauses.len() {
+                continue;
+            }
+            let slice = &clauses[i..i + len];
+            if clauses_equal(slice, default_clauses) || clauses_equal(slice, cased_clauses) {
+                matched = Some((*name, len));
+                break;
+            }
+        }
+        match matched {
+            Some((name, len)) => {
+                out.push(name.to_string());
+                i += len;
+            }
+            None => {
+                out.push(clauses[i].clone());
+                i += 1;
+            }
+        }
+    }
+    out.join(" and ")
+}
+
+fn matches_any_macro(clause: &str) -> bool {
+    let binding = clause.to_string();
+    let slice = std::slice::from_ref(&binding);
+    MACRO_CLAUSES
+        .iter()
+        .any(|(_, def, cased)| clauses_equal(slice, def) || clauses_equal(slice, cased))
+}
+
+fn clauses_equal(left: &[String], right: &[String]) -> bool {
+    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| a.trim() == b.trim())
+}
+
+// =============================================================================
+// Internal: clause splitting and operator normalization
+// =============================================================================
+
+/// Split an expression on top-level `and` boundaries, preserving the
+/// inner structure of parenthesized groups and single-quoted string
+/// literals (no `and` inside `(...)` or `'...'` is treated as a
+/// boundary). Mirrors [`super::envelope::soft_wrap`]'s internal
+/// splitter so envelope wrapping and macro recognition see the same
+/// clause boundaries.
+fn split_top_level_and(expr: &str) -> Vec<String> {
+    let bytes = expr.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == b'\'' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => in_str = true,
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && matches_token(bytes, i, b" and ") {
+            let piece = expr[start..i].trim().to_string();
+            if !piece.is_empty() {
+                out.push(piece);
+            }
+            i += b" and ".len();
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    let tail = expr[start..].trim().to_string();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
+}
+
+fn matches_token(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
+    if i + kw.len() > bytes.len() {
+        return false;
+    }
+    bytes[i..i + kw.len()].eq_ignore_ascii_case(kw)
+}
+
+/// Split a multi-clause macro source string on top-level ` and `, the
+/// same way the recognizer splits its input. Used at startup to
+/// pre-decompose `EXPRESSION_MACROS` into clause vectors.
+fn split_clauses(src: &str) -> Vec<&str> {
+    let bytes = src.as_bytes();
+    let mut out: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == b'\'' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => in_str = true,
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && matches_token(bytes, i, b" and ") {
+            out.push(src[start..i].trim());
+            i += b" and ".len();
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    let tail = src[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
+}
+
+/// Convert a cased-form clause (`field = 'literal'`) into the
+/// default-form output (`field imatches 'literal'`) so the recognizer
+/// matches both styles.
+///
+/// Only the ` = '<literal>'` shape is transformed; numeric, boolean,
+/// regex, function-call, and field-to-field equalities are passed
+/// through unchanged (Sigma's case modifier does not apply to them
+/// in the backend's rendering either).
+fn to_imatches(clause: &str) -> String {
+    // Find a top-level ` = '` boundary; if none, return verbatim.
+    let bytes = clause.as_bytes();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == b'\'' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => in_str = true,
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && matches_token(bytes, i, b" = '") {
+            let mut out = String::with_capacity(clause.len() + 6);
+            out.push_str(&clause[..i]);
+            out.push_str(" imatches '");
+            out.push_str(&clause[i + b" = '".len()..]);
+            return out;
+        }
+        i += 1;
+    }
+    clause.to_string()
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -98,12 +351,178 @@ mod tests {
     #[test]
     fn known_macro_lookup() {
         assert!(is_known_macro("spawn_process"));
-        assert!(is_known_macro("create_remote_thread"));
-        // Composite macros (`modify_registry`, `inbound_network`,
-        // `outbound_network`, `load_driver`, `load_unsigned_module`, ...)
-        // upstream defines on top of other macros are intentionally absent
-        // from the leaf table; Phase 3 recognizes them in a separate pass.
+        assert!(is_known_macro("create_thread"));
+        assert!(is_known_macro("open_file"));
+        // Composite macros upstream defines on top of other macros
+        // (`modify_registry`, `inbound_network`, `outbound_network`,
+        // `load_driver`, ...) are deliberately absent from the
+        // single-clause table; multi-step recognition can land them in
+        // a follow-up.
         assert!(!is_known_macro("modify_registry"));
         assert!(!is_known_macro("not_a_macro"));
+    }
+
+    // -----------------------------------------------------------------
+    // Single-clause recognition
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn recognize_spawn_process_default_form() {
+        let out = recognize("evt.name imatches 'CreateProcess'");
+        assert_eq!(out, "spawn_process");
+    }
+
+    #[test]
+    fn recognize_spawn_process_cased_form() {
+        let out = recognize("evt.name = 'CreateProcess'");
+        assert_eq!(out, "spawn_process");
+    }
+
+    #[test]
+    fn recognize_spawn_process_with_extra_clauses() {
+        let out = recognize(
+            "evt.name imatches 'CreateProcess' and ps.exe iendswith '\\cmd.exe' and ps.cmdline icontains 'whoami'",
+        );
+        assert_eq!(
+            out,
+            "spawn_process and ps.exe iendswith '\\cmd.exe' and ps.cmdline icontains 'whoami'",
+        );
+    }
+
+    #[test]
+    fn recognize_write_file_and_read_file() {
+        let out = recognize("evt.name imatches 'WriteFile' and file.path iendswith '\\out.log'");
+        assert_eq!(out, "write_file and file.path iendswith '\\out.log'");
+        let out2 = recognize("evt.name imatches 'ReadFile'");
+        assert_eq!(out2, "read_file");
+    }
+
+    // -----------------------------------------------------------------
+    // Multi-clause recognition (greedy longest match)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn recognize_open_file_three_clauses() {
+        let out = recognize(
+            "evt.name imatches 'CreateFile' and file.operation imatches 'OPEN' and file.status imatches 'Success'",
+        );
+        assert_eq!(out, "open_file");
+    }
+
+    #[test]
+    fn recognize_open_file_keeps_trailing_clauses() {
+        let out = recognize(
+            "evt.name imatches 'CreateFile' and file.operation imatches 'OPEN' and file.status imatches 'Success' and file.path iendswith '\\secret.txt'",
+        );
+        assert_eq!(out, "open_file and file.path iendswith '\\secret.txt'");
+    }
+
+    #[test]
+    fn recognize_set_value_two_clauses() {
+        let out = recognize(
+            "evt.name imatches 'RegSetValue' and registry.status imatches 'Success' and registry.path icontains '\\Run\\'",
+        );
+        assert_eq!(out, "set_value and registry.path icontains '\\Run\\'",);
+    }
+
+    #[test]
+    fn recognize_open_process_two_clauses_cased() {
+        // Cased form: backend emitted with `-O case_sensitive=true`.
+        let out = recognize("evt.name = 'OpenProcess' and ps.access.status = 'Success'");
+        assert_eq!(out, "open_process");
+    }
+
+    // -----------------------------------------------------------------
+    // No-false-positive cases
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn recognize_does_not_match_with_different_value() {
+        // `evt.name imatches 'CreateThread'` is a macro
+        // (`create_thread`); `'CreateProcess'` is a different macro
+        // (`spawn_process`). Neither should match the other.
+        let out = recognize("evt.name imatches 'TerminateProcess'");
+        assert_eq!(out, "evt.name imatches 'TerminateProcess'");
+    }
+
+    #[test]
+    fn recognize_does_not_match_with_extra_modifier() {
+        // `iendswith` is a partial-match operator; even on the same
+        // field/value pair it must not match the equality-based macro.
+        let out = recognize("evt.name iendswith 'CreateProcess'");
+        assert_eq!(out, "evt.name iendswith 'CreateProcess'");
+    }
+
+    #[test]
+    fn recognize_does_not_cross_or_groups() {
+        // The OR group is one top-level clause; the inner contents
+        // are parenthesized, so the splitter does not see them as
+        // separate `and`s. `spawn_process` is therefore not inside.
+        let out = recognize(
+            "(evt.name imatches 'CreateProcess' or evt.name imatches 'CreateThread') and ps.pid = 4",
+        );
+        assert_eq!(
+            out,
+            "(evt.name imatches 'CreateProcess' or evt.name imatches 'CreateThread') and ps.pid = 4",
+        );
+    }
+
+    #[test]
+    fn recognize_picks_longest_match() {
+        // Both `evt.name imatches 'CreateFile'` (no macro alone, but a
+        // prefix of three) and the full `open_file` triple are
+        // available; the greedy longest-match must produce
+        // `open_file`, not three bare clauses.
+        let out = recognize(
+            "evt.name imatches 'CreateFile' and file.operation imatches 'OPEN' and file.status imatches 'Success'",
+        );
+        assert_eq!(out, "open_file");
+        // Without the trailing two clauses the bare `evt.name = '...'`
+        // is not itself a macro, so the input passes through.
+        let out2 = recognize("evt.name imatches 'CreateFile'");
+        assert_eq!(out2, "evt.name imatches 'CreateFile'");
+    }
+
+    #[test]
+    fn recognize_passes_through_when_no_macro_matches() {
+        let input = "ps.exe iendswith '\\cmd.exe' and ps.cmdline icontains 'whoami'";
+        assert_eq!(recognize(input), input);
+    }
+
+    #[test]
+    fn recognize_handles_empty_input() {
+        assert_eq!(recognize(""), "");
+    }
+
+    // -----------------------------------------------------------------
+    // Splitter sanity (respects parens and quotes)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn split_keeps_paren_groups_intact() {
+        let out = split_top_level_and("(a or b) and c and (d and e)");
+        assert_eq!(out, vec!["(a or b)", "c", "(d and e)"]);
+    }
+
+    #[test]
+    fn split_keeps_quoted_and_inside_strings() {
+        let out = split_top_level_and("field = 'and inside string' and other");
+        assert_eq!(out, vec!["field = 'and inside string'", "other"]);
+    }
+
+    #[test]
+    fn to_imatches_substitutes_first_top_level_equality() {
+        assert_eq!(
+            to_imatches("evt.name = 'CreateProcess'"),
+            "evt.name imatches 'CreateProcess'",
+        );
+    }
+
+    #[test]
+    fn to_imatches_leaves_numeric_equality_alone() {
+        // `evt.pid != 4` uses `!=`, not ` = '`, so to_imatches passes
+        // it through unchanged. The recognizer compares numeric
+        // clauses byte-for-byte regardless of `case_sensitive`.
+        assert_eq!(to_imatches("evt.pid != 4"), "evt.pid != 4");
     }
 }

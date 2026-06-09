@@ -725,10 +725,7 @@ detection:
 
     assert_eq!(q.len(), 1);
     let out = &q[0];
-    assert!(
-        out.contains("evt.name imatches 'CreateProcess'"),
-        "got: {out}"
-    );
+    assert!(out.contains("spawn_process"), "got: {out}");
     // The Sigma source `'\cmd.exe'` parses as the literal `\cmd.exe`;
     // Fibratus single-quoted strings need `\\` for a literal `\`, so
     // the rendered value carries the double-escape.
@@ -762,7 +759,9 @@ detection:
     let q = backend.convert_rule(rule, "expr", &state).unwrap();
 
     let out = &q[0];
-    assert!(out.contains("evt.name imatches 'Connect'"), "got: {out}");
+    // `evt.name: Connect` injected by the pipeline matches the
+    // `connect_socket` macro after recognition.
+    assert!(out.contains("connect_socket"), "got: {out}");
     assert!(
         out.contains("cidr_contains(net.dip, '10.0.0.0/8')"),
         "got: {out}",
@@ -791,6 +790,9 @@ detection:
     let q = backend.convert_rule(rule, "expr", &state).unwrap();
 
     let out = &q[0];
+    // `evt.name: RegSetValue` is the single-clause `set_value` macro
+    // body but the registry status guard is not added by the
+    // pipeline, so the standalone clause stays as the raw form.
     assert!(
         out.contains("evt.name imatches 'RegSetValue'"),
         "got: {out}"
@@ -799,6 +801,77 @@ detection:
         out.contains(r"registry.path icontains '\\CurrentVersion\\Run\\'"),
         "got: {out}",
     );
+}
+
+// ---------------------------------------------------------------------
+// Macro recognition (use_macros, default on)
+// ---------------------------------------------------------------------
+
+#[test]
+fn macros_recognize_spawn_process_via_pipeline() {
+    // The fibratus_windows pipeline injects `evt.name: CreateProcess`;
+    // the backend then renders it as `evt.name imatches 'CreateProcess'`,
+    // which the macro recognizer must rewrite to `spawn_process`.
+    use rsigma_eval::pipeline::{apply_pipelines_with_state, builtin::resolve_builtin};
+
+    let yaml = r#"
+title: cmd.exe with whoami
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image|endswith: '\cmd.exe'
+    CommandLine|contains: 'whoami'
+  condition: selection
+"#;
+    let mut collection = rsigma_parser::parse_sigma_yaml(yaml).unwrap();
+    let pipeline = resolve_builtin("fibratus_windows").unwrap().unwrap();
+    let backend = FibratusBackend::new();
+    let rule = &mut collection.rules[0];
+    let state = apply_pipelines_with_state(&[pipeline], rule).unwrap();
+    let q = backend.convert_rule(rule, "expr", &state).unwrap();
+    assert_eq!(q.len(), 1);
+    let out = &q[0];
+    assert!(
+        out.contains("spawn_process"),
+        "expected spawn_process, got: {out}"
+    );
+    assert!(
+        !out.contains("evt.name imatches 'CreateProcess'"),
+        "macro should have replaced the raw clause, got: {out}",
+    );
+}
+
+#[test]
+fn macros_disabled_emits_raw_clauses() {
+    use std::collections::HashMap;
+    let mut opts: HashMap<String, String> = HashMap::new();
+    opts.insert("use_macros".to_string(), "false".to_string());
+    let backend = FibratusBackend::from_options(&opts);
+
+    use rsigma_eval::pipeline::{apply_pipelines_with_state, builtin::resolve_builtin};
+    let yaml = r#"
+title: t
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image|endswith: '\cmd.exe'
+  condition: selection
+"#;
+    let mut collection = rsigma_parser::parse_sigma_yaml(yaml).unwrap();
+    let pipeline = resolve_builtin("fibratus_windows").unwrap().unwrap();
+    let rule = &mut collection.rules[0];
+    let state = apply_pipelines_with_state(&[pipeline], rule).unwrap();
+    let q = backend.convert_rule(rule, "expr", &state).unwrap();
+    assert!(
+        q[0].contains("evt.name imatches 'CreateProcess'"),
+        "expected raw evt.name clause with use_macros=false, got: {}",
+        q[0],
+    );
+    assert!(!q[0].contains("spawn_process"));
 }
 
 #[test]

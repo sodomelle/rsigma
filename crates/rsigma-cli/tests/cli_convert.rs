@@ -131,9 +131,12 @@ fn convert_simple_rule_to_fibratus_expr_format() {
         String::from_utf8_lossy(&output.stderr),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // `evt.name: CreateProcess` injected by the `fibratus_windows`
+    // pipeline is recognized as the `spawn_process` macro under the
+    // default `-O use_macros=true`.
     assert!(
-        stdout.contains("evt.name imatches 'CreateProcess'"),
-        "stdout missing CreateProcess: {stdout}",
+        stdout.contains("spawn_process"),
+        "stdout missing spawn_process: {stdout}",
     );
     assert!(
         stdout.contains("ps.cmdline icontains 'whoami'"),

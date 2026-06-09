@@ -39,7 +39,22 @@ use rsigma_parser::{ConditionOperator, CorrelationCondition, CorrelationRule, Co
 use super::FibratusBackend;
 use super::config::FibratusConfig;
 use super::envelope::render_correlation_yaml;
+use super::macros;
 use crate::error::{ConvertError, Result};
+
+/// Apply backend-level macro recognition to a single stage body. Each
+/// stage in a `sequence ... | <stage> | by ...` DSL is itself a
+/// Fibratus filter expression, so the same `EXPRESSION_MACROS`
+/// rewriting that runs on detection rules also reads naturally here
+/// (`spawn_process and ...` rather than
+/// `evt.name imatches 'CreateProcess' and ...`).
+fn maybe_apply_macros(body: String, cfg: &FibratusConfig) -> String {
+    if cfg.use_macros {
+        macros::recognize(&body)
+    } else {
+        body
+    }
+}
 
 // ---------------------------------------------------------------------
 // Entry point
@@ -142,7 +157,7 @@ fn build_temporal_permutations(
 
         let stages: Vec<String> = perm
             .iter()
-            .map(|name| resolve_query(name, rule_queries))
+            .map(|name| resolve_query(name, rule_queries).map(|body| maybe_apply_macros(body, cfg)))
             .collect::<Result<Vec<_>>>()?;
         let mut stages_with_bindings: Vec<String> = Vec::with_capacity(stages.len());
         for (i, body) in stages.iter().enumerate() {
@@ -286,7 +301,7 @@ fn require_supported_correlation_type(rule: &CorrelationRule) -> Result<()> {
 fn build_temporal_sequence(
     rule: &CorrelationRule,
     rule_queries: &HashMap<String, String>,
-    _cfg: &FibratusConfig,
+    cfg: &FibratusConfig,
 ) -> Result<String> {
     if rule.rules.is_empty() {
         return Err(ConvertError::UnsupportedCorrelation(
@@ -297,7 +312,7 @@ fn build_temporal_sequence(
     let stages: Vec<String> = rule
         .rules
         .iter()
-        .map(|name| resolve_query(name, rule_queries))
+        .map(|name| resolve_query(name, rule_queries).map(|body| maybe_apply_macros(body, cfg)))
         .collect::<Result<Vec<_>>>()?;
 
     let mut stages_with_bindings: Vec<String> = Vec::with_capacity(stages.len());
@@ -339,7 +354,7 @@ fn build_event_count_sequence(
         )));
     }
 
-    let body = resolve_query(&rule.rules[0], rule_queries)?;
+    let body = maybe_apply_macros(resolve_query(&rule.rules[0], rule_queries)?, cfg);
     let mut stages: Vec<String> = Vec::with_capacity(threshold as usize);
     for idx in 0..threshold as usize {
         stages.push(pin_group_by_after_first(&body, &rule.group_by, idx));
@@ -400,7 +415,7 @@ fn build_value_count_sequence(
         )));
     }
 
-    let body = resolve_query(&rule.rules[0], rule_queries)?;
+    let body = maybe_apply_macros(resolve_query(&rule.rules[0], rule_queries)?, cfg);
     let mut stages: Vec<String> = Vec::with_capacity(threshold as usize);
     for idx in 0..threshold as usize {
         // Alias each stage so later stages can reference prior values.
@@ -655,9 +670,11 @@ correlation:
         assert_eq!(q.len(), 1);
         let body = &q[0];
         assert!(body.starts_with("sequence\nmaxspan 1m\n"));
-        assert!(body.contains("|evt.name imatches 'Connect'\n"));
+        // Per-stage bodies pass through the macro recognizer too, so
+        // `evt.name imatches 'Connect'` becomes `connect_socket`.
+        assert!(body.contains("|connect_socket\n"));
         assert!(body.contains("| by ps.pid"));
-        assert!(body.contains("|evt.name imatches 'CreateProcess'\n"));
+        assert!(body.contains("|spawn_process\n"));
     }
 
     #[test]

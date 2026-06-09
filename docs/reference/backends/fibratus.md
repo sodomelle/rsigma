@@ -22,7 +22,7 @@ Pass with `-O key=value` (repeatable). Unknown keys are silently ignored so forw
 |--------|---------|---------|
 | `action` | unset | Comma-separated list of Fibratus actions to append to each rule envelope (`-O action=kill,isolate` emits `action: [- name: kill, - name: isolate]`). |
 | `min_engine` | `3.0.0` | Value written to the `min-engine-version:` field of every emitted rule. |
-| `use_macros` | `true` | Phase-3 macro recognition. Reserved for a follow-up pass that rewrites recognized condition sub-trees as upstream macro calls (`spawn_process`/`open_file`/...). Currently a no-op flag. |
+| `use_macros` | `true` | When `true`, rewrites recognized condition clause runs into idiomatic Fibratus macro calls (`spawn_process`, `create_thread`, `write_file`, `read_file`, `open_file`, `set_value`, `open_process`, `open_thread`, ...). The recognizer walks top-level `and` clauses and greedy-longest-match-replaces contiguous runs that match a macro's clause sequence (single-clause forms like `evt.name imatches 'CreateProcess'` and multi-clause runs like `evt.name imatches 'CreateFile' and file.operation imatches 'OPEN' and file.status imatches 'Success'`). Set to `false` to keep the raw `evt.name imatches '...'` forms. |
 | `default_logsource` | `windows` | Default `product:` to assume when a Sigma rule lacks an explicit logsource. Used by the matching pipeline transformations. |
 | `emit_metadata` | `true` | When `false`, omit the `description:` and `labels:` blocks. Useful when the target Fibratus install already enriches rule metadata from another source. |
 | `max_repeated_slots` | `5` | Maximum number of repeated/distinct sequence stages the backend generates when emulating `event_count` / `value_count` correlation. Thresholds above the cap return `UnsupportedCorrelation`. |
@@ -130,16 +130,18 @@ labels:
   tactic.ref: 'https://attack.mitre.org/tactics/TA0002/'
 condition: >
   ps.exe iendswith '\\cmd.exe' and ps.parent.exe iendswith '\\explorer.exe'
-  and ps.cmdline icontains 'whoami' and evt.name imatches 'CreateProcess'
+  and ps.cmdline icontains 'whoami' and spawn_process
 min-engine-version: 3.0.0
 ```
+
+The trailing `spawn_process` is the macro recognizer rewriting the raw `evt.name imatches 'CreateProcess'` clause injected by the pipeline; set `-O use_macros=false` to keep the raw form.
 
 ### `expr`
 
 Filter expression only, no YAML envelope. Useful for piping into ad-hoc Fibratus run commands:
 
 ```text
-ps.exe iendswith '\\cmd.exe' and ps.parent.exe iendswith '\\explorer.exe' and ps.cmdline icontains 'whoami' and evt.name imatches 'CreateProcess'
+ps.exe iendswith '\\cmd.exe' and ps.parent.exe iendswith '\\explorer.exe' and ps.cmdline icontains 'whoami' and spawn_process
 ```
 
 ## Correlation rules
@@ -185,7 +187,6 @@ min-engine-version: 3.0.0
 ## Caveats and follow-ups
 
 - **Multi-value CIDR / regex.** The shared `default_convert_detection_item` dispatch only reads the first value when the field carries `|cidr` or `|re`. This affects every text backend in the workspace; the Fibratus backend inherits the gap. Workaround: emit one rule per CIDR/regex value, or split with `|` alternation inside a single regex pattern.
-- **Macro recognition (`use_macros`).** The macro library is loaded at backend init, but the AST-level recognition pass that rewrites recognized sub-trees into idiomatic macro calls (`spawn_process`, `open_file`, ...) is not wired yet. The flag has no effect today; the rendered output uses the raw `evt.name imatches '...'` forms instead of macros.
 - **Cross-process target fields.** The `create_remote_thread` and `process_access` field mappings cover the source-process side and (for create_remote_thread) the start-address triple, but they do not rename Sigma's `TargetImage` field for either category. Fibratus exposes `thread.pid` for the target process on a `CreateThread` event and `ps.access.status` on `OpenProcess`, but no documented `thread.image` or `ps.access.image` field for the target executable. Rules that reference `TargetImage`/`TargetProcessId`/`GrantedAccess` will fail conversion with an unsupported-field error rather than emit an invented field name; pair them with a custom pipeline if your Fibratus build exposes these fields under different names.
 
 ## Related material
