@@ -201,6 +201,20 @@ The backend handles every aggregation type:
 
 Non-temporal correlations that reference detection rules in the same collection auto-wrap the detection logic in `WITH combined_events AS (q1 UNION ALL q2 ...)`. Multi-table temporal correlations (where referenced detection rules target different tables via pipeline routing) generate `UNION ALL` CTEs with a `rule_name` discriminator column.
 
+### Window modes
+
+A correlation rule's `window` attribute selects the windowing strategy, independent of the output format:
+
+| `window` | Strategy |
+|----------|----------|
+| absent or `sliding` | Unchanged from before the attribute existed: the per-format aggregate (or the window-function form under `sliding_window`). |
+| `tumbling` | Boundary-aligned buckets sized to the rule's `timespan`: `time_bucket('<timespan> seconds', <ts>)` on TimescaleDB, `date_bin('<timespan> seconds', <ts>, TIMESTAMPTZ 'epoch')` on plain PostgreSQL, added to the `GROUP BY`. |
+| `session` | Gaps-and-islands: `LAG` marks the first event of each session (gap larger than `gap`), a running `SUM` assigns a per-group `session_id`, and the aggregate is grouped per session. |
+
+Tumbling and session apply to the aggregate types (`event_count`, `value_count`, `value_sum`, `value_avg`, `value_percentile`, `value_median`). On a `temporal`/`temporal_ordered` rule they return an unsupported-correlation error.
+
+For session windows the `gap` is honored exactly, but the `timespan` cap is enforced as a `HAVING (MAX(<ts>) - MIN(<ts>)) <= INTERVAL '<timespan> seconds'` filter, which drops sessions longer than the cap rather than splitting them mid-session as the runtime engine does. `rsigma backend convert` emits a stderr warning noting this approximation.
+
 ## Custom attributes
 
 The backend reads three per-rule attributes from `custom_attributes:`:

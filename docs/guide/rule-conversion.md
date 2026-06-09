@@ -170,6 +170,38 @@ SELECT * FROM event_counts WHERE correlation_event_count >= 5
 
 This is the right format when you want per-event explanations of why a brute-force correlation fired, rather than a single aggregate row.
 
+### Correlation window modes
+
+A correlation rule can declare how its `timespan` is anchored to the event stream with the optional `window` attribute (`sliding`, `tumbling`, or `session`). The PostgreSQL backend renders the windowing strategy from this attribute, independent of the output format:
+
+- `window` absent or `sliding`: the SQL is unchanged from before this attribute existed (the per-format aggregate, or the window-function form under `sliding_window`), so existing rules and queries are unaffected.
+- `window: tumbling`: fixed, boundary-aligned buckets sized to the rule's `timespan`. On TimescaleDB this is `time_bucket('<timespan> seconds', time)`; on plain PostgreSQL it is `date_bin('<timespan> seconds', time, TIMESTAMPTZ 'epoch')`, both added to the `GROUP BY` alongside the group-by columns.
+- `window: session`: a gaps-and-islands query. `LAG` flags the first event of each session (a gap larger than `gap`), a running `SUM` assigns a per-group `session_id`, and the aggregate is computed per session:
+
+```sql
+WITH source AS (SELECT * FROM security_events),
+marked AS (
+    SELECT *,
+        CASE WHEN LAG(time) OVER (PARTITION BY "User" ORDER BY time) IS NULL
+             OR time - LAG(time) OVER (PARTITION BY "User" ORDER BY time) > INTERVAL '30 seconds'
+        THEN 1 ELSE 0 END AS is_new_session
+    FROM source
+),
+sessions AS (
+    SELECT *, SUM(is_new_session) OVER (
+        PARTITION BY "User" ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS session_id
+    FROM marked
+)
+SELECT "User", session_id, COUNT(*) AS event_count,
+    MIN(time) AS first_seen, MAX(time) AS last_seen
+FROM sessions
+GROUP BY "User", session_id
+HAVING COUNT(*) >= 3 AND (MAX(time) - MIN(time)) <= INTERVAL '3600 seconds'
+```
+
+The `gap` is honored exactly. The `timespan` cap is enforced as the trailing `HAVING` filter, which drops sessions longer than the cap rather than splitting them mid-session as the runtime engine does; `rsigma backend convert` prints a warning to stderr noting this. Tumbling and session are supported for the aggregate correlation types (`event_count`, `value_count`, `value_sum`, `value_avg`, `value_percentile`, `value_median`); `window: tumbling` or `window: session` on a `temporal`/`temporal_ordered` rule returns an unsupported-correlation error.
+
 ### Multi-table temporal correlations
 
 When a `temporal` correlation references detection rules that target different tables (via per-logsource pipeline routing or the `postgres.table` custom attribute), the backend automatically generates a `UNION ALL` CTE:
