@@ -173,6 +173,11 @@ pub struct PostgresBackend {
     /// (`sliding`/`tumbling`/`session`), mirroring pySigma's
     /// `correlation_methods`. `None` falls back to each rule's own `window`.
     pub correlation_method: Option<String>,
+    /// Default session gap in seconds, from the `gap` option (e.g. `gap=5m`).
+    /// Used when a session window is requested (via the rule or
+    /// `correlation_method=session`) and the rule does not declare its own
+    /// `gap`. A rule's own `gap` always wins.
+    pub session_gap_secs: Option<u64>,
 }
 
 impl PostgresBackend {
@@ -187,13 +192,15 @@ impl PostgresBackend {
             database: None,
             timescaledb: false,
             correlation_method: None,
+            session_gap_secs: None,
         }
     }
 
     /// Create a backend from CLI-style key=value option pairs.
     ///
     /// Recognized keys: `table`, `schema`, `database`, `timestamp_field`,
-    /// `json_field`, `case_sensitive_re` (true/false).
+    /// `json_field`, `case_sensitive_re` (true/false), `correlation_method`
+    /// (sliding/tumbling/session), `gap` (default session gap, e.g. `5m`).
     /// Unknown keys are silently ignored so forward-compatible options can be
     /// added without breaking existing invocations.
     pub fn from_options(options: &HashMap<String, String>) -> Self {
@@ -218,6 +225,11 @@ impl PostgresBackend {
         }
         if let Some(v) = options.get("correlation_method") {
             backend.correlation_method = Some(v.clone());
+        }
+        if let Some(v) = options.get("gap") {
+            // Invalid durations are ignored here (consistent with the lenient
+            // option handling above); the CLI validates the format up front.
+            backend.session_gap_secs = Timespan::parse(v).ok().map(|t| t.seconds);
         }
         backend
     }
@@ -459,6 +471,7 @@ impl PostgresBackend {
             database: self.database.clone(),
             timescaledb: self.timescaledb,
             correlation_method: self.correlation_method.clone(),
+            session_gap_secs: self.session_gap_secs,
         }
     }
 
@@ -1124,9 +1137,21 @@ impl Backend for PostgresBackend {
             return Ok(vec![query]);
         }
         if matches!(window, WindowMode::Session) {
-            let gap_secs = rule.gap.as_ref().map(|g| g.seconds).ok_or_else(|| {
-                ConvertError::UnsupportedCorrelation("session window requires a 'gap'".into())
-            })?;
+            // The rule's own `gap` wins; the `gap` backend option provides the
+            // default so `correlation_method=session` works for rules that do
+            // not declare one.
+            let gap_secs = rule
+                .gap
+                .as_ref()
+                .map(|g| g.seconds)
+                .or(self.session_gap_secs)
+                .ok_or_else(|| {
+                    ConvertError::UnsupportedCorrelation(
+                        "session window requires a 'gap' (set it on the rule or pass \
+                         -O gap=5m as a conversion default)"
+                            .into(),
+                    )
+                })?;
             let query = if temporal {
                 self.build_temporal_session(
                     rule,

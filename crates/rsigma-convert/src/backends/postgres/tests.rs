@@ -2635,6 +2635,105 @@ correlation:
 }
 
 #[test]
+fn test_gap_option_provides_default_session_gap() {
+    // `-O correlation_method=session -O gap=5m` converts a rule that declares
+    // no gap of its own.
+    let yaml = r#"
+title: Session via options
+correlation:
+    type: event_count
+    rules:
+        - a
+    group-by:
+        - User
+    timespan: 1h
+    condition:
+        gte: 3
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    let opts = std::collections::HashMap::from([
+        ("correlation_method".to_string(), "session".to_string()),
+        ("gap".to_string(), "5m".to_string()),
+    ]);
+    let backend = PostgresBackend::from_options(&opts);
+    let q = &backend
+        .convert_correlation_rule(
+            &collection.correlations[0],
+            "default",
+            &PipelineState::default(),
+        )
+        .unwrap()[0];
+    assert!(q.contains("INTERVAL '300 seconds'"), "gap 5m: {q}");
+    assert!(q.contains("AS session_id"), "{q}");
+}
+
+#[test]
+fn test_rule_gap_wins_over_gap_option() {
+    let yaml = r#"
+title: Rule gap precedence
+correlation:
+    type: event_count
+    rules:
+        - a
+    group-by:
+        - User
+    window: session
+    gap: 10m
+    timespan: 1h
+    condition:
+        gte: 3
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    let opts = std::collections::HashMap::from([("gap".to_string(), "5m".to_string())]);
+    let backend = PostgresBackend::from_options(&opts);
+    let q = &backend
+        .convert_correlation_rule(
+            &collection.correlations[0],
+            "default",
+            &PipelineState::default(),
+        )
+        .unwrap()[0];
+    assert!(q.contains("INTERVAL '600 seconds'"), "rule gap 10m: {q}");
+    assert!(
+        !q.contains("INTERVAL '300 seconds'"),
+        "option gap must not override the rule's own gap: {q}"
+    );
+}
+
+#[test]
+fn test_session_without_any_gap_errors_with_hint() {
+    let yaml = r#"
+title: No gap anywhere
+correlation:
+    type: event_count
+    rules:
+        - a
+    group-by:
+        - User
+    timespan: 1h
+    condition:
+        gte: 3
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    let opts = std::collections::HashMap::from([(
+        "correlation_method".to_string(),
+        "session".to_string(),
+    )]);
+    let backend = PostgresBackend::from_options(&opts);
+    let err = backend.convert_correlation_rule(
+        &collection.correlations[0],
+        "default",
+        &PipelineState::default(),
+    );
+    match err {
+        Err(ConvertError::UnsupportedCorrelation(msg)) => {
+            assert!(msg.contains("-O gap="), "{msg}");
+        }
+        other => panic!("expected UnsupportedCorrelation, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_unknown_correlation_method_errors() {
     let yaml = r#"
 title: Bad method

@@ -28,9 +28,7 @@ impl ConversionOutput {
                 .map(move |w| (r.rule_title.as_str(), w.as_str()))
         })
     }
-}
 
-impl ConversionOutput {
     pub fn new() -> Self {
         Self {
             queries: Vec::new(),

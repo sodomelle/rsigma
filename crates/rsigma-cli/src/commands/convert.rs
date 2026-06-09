@@ -133,6 +133,13 @@ pub(crate) fn cmd_convert(args: ConvertArgs, ctx: OutputCtx) {
         }
     }
 
+    if let Some(gap) = options.get("gap")
+        && rsigma_parser::Timespan::parse(gap).is_err()
+    {
+        eprintln!("Invalid gap '{gap}': expected a duration like 30s, 5m, 1h, 7d");
+        process::exit(crate::exit_code::CONFIG_ERROR);
+    }
+
     let result =
         rsigma_convert::convert_collection(backend.as_ref(), &collection, &pipelines, &format);
     match result {
