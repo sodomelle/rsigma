@@ -124,7 +124,18 @@ pub(crate) fn lint_correlation_rule(m: &yaml_serde::Mapping, warnings: &mut Vec<
     }
 
     // ── window + gap ──────────────────────────────────────────────────────
-    let window = get_str(corr, "window");
+    // Accept both spellings: the `rsigma.*` extension namespace (top-level
+    // `rsigma.window` / `rsigma.gap`) is primary, and the first-class
+    // `correlation.window` / `correlation.gap` keys are aliases. The `rsigma.*`
+    // spelling wins when both are present, and the diagnostic points at it.
+    let (window, window_ptr) = match get_str(m, "rsigma.window") {
+        Some(w) => (Some(w), "/rsigma.window"),
+        None => (get_str(corr, "window"), "/correlation/window"),
+    };
+    let (gap, gap_ptr) = match get_str(m, "rsigma.gap") {
+        Some(g) => (Some(g), "/rsigma.gap"),
+        None => (get_str(corr, "gap"), "/correlation/gap"),
+    };
     let window_known = window.is_none_or(|w| VALID_WINDOW_MODES.contains(&w));
     if let Some(w) = window
         && !VALID_WINDOW_MODES.contains(&w)
@@ -135,18 +146,17 @@ pub(crate) fn lint_correlation_rule(m: &yaml_serde::Mapping, warnings: &mut Vec<
                 "invalid window mode \"{w}\", expected one of: {}",
                 VALID_WINDOW_MODES.join(", ")
             ),
-            "/correlation/window",
+            window_ptr,
         ));
     }
 
-    let gap = get_str(corr, "gap");
     if let Some(g) = gap
         && !is_valid_timespan(g)
     {
         warnings.push(err(
             LintRule::InvalidGapFormat,
             format!("invalid gap \"{g}\", expected format like 5m, 1h, 30s, 7d"),
-            "/correlation/gap",
+            gap_ptr,
         ));
     }
 
@@ -158,13 +168,13 @@ pub(crate) fn lint_correlation_rule(m: &yaml_serde::Mapping, warnings: &mut Vec<
             warnings.push(err(
                 LintRule::MissingSessionGap,
                 "window: session requires a 'gap' (e.g. gap: 5m)",
-                "/correlation/gap",
+                gap_ptr,
             ));
         } else if !is_session && gap.is_some() {
             warnings.push(err(
                 LintRule::GapWithoutSession,
                 "'gap' is only valid with window: session",
-                "/correlation/gap",
+                gap_ptr,
             ));
         }
     }
@@ -540,6 +550,49 @@ correlation:
     timespan: 2h
     window: session
     gap: 5m
+"#,
+        );
+        assert!(!has_rule(&w, LintRule::InvalidWindowMode));
+        assert!(!has_rule(&w, LintRule::MissingSessionGap));
+        assert!(!has_rule(&w, LintRule::GapWithoutSession));
+        assert!(!has_rule(&w, LintRule::InvalidGapFormat));
+    }
+
+    #[test]
+    fn rsigma_namespace_session_missing_gap() {
+        // The lint also reasons about the rsigma.* extension spelling.
+        let w = lint(
+            r#"
+title: Test
+correlation:
+    type: temporal
+    rules:
+        - a
+        - b
+    group-by:
+        - User
+    timespan: 2h
+rsigma.window: session
+"#,
+        );
+        assert!(has_rule(&w, LintRule::MissingSessionGap));
+    }
+
+    #[test]
+    fn rsigma_namespace_valid_session_no_errors() {
+        let w = lint(
+            r#"
+title: Test
+correlation:
+    type: temporal
+    rules:
+        - a
+        - b
+    group-by:
+        - User
+    timespan: 2h
+rsigma.window: session
+rsigma.gap: 5m
 "#,
         );
         assert!(!has_rule(&w, LintRule::InvalidWindowMode));

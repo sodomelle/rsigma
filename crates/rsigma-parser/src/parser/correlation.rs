@@ -76,7 +76,14 @@ pub(super) fn parse_correlation_rule(
     let timespan = Timespan::parse(timespan_str)?;
 
     // Window mode (optional, defaults to sliding) and the session `gap`.
-    let window = match get_str(corr, "window") {
+    //
+    // Two spellings are accepted. The `rsigma.*` engine-extension namespace
+    // (top-level `rsigma.window` / `rsigma.gap`, alongside `rsigma.suppress`
+    // and friends) is the primary form; the first-class `correlation.window` /
+    // `correlation.gap` keys are accepted as aliases. The `rsigma.*` spelling
+    // wins when both are present.
+    let window_str = get_str(m, "rsigma.window").or_else(|| get_str(corr, "window"));
+    let window = match window_str {
         Some(w) => w.parse::<WindowMode>().map_err(|_| {
             SigmaParserError::InvalidCorrelation(format!(
                 "Unknown window mode: {w} (expected sliding, tumbling, or session)"
@@ -84,14 +91,15 @@ pub(super) fn parse_correlation_rule(
         })?,
         None => WindowMode::default(),
     };
-    let gap = match get_str(corr, "gap") {
+    let gap_str = get_str(m, "rsigma.gap").or_else(|| get_str(corr, "gap"));
+    let gap = match gap_str {
         Some(g) => Some(Timespan::parse(g)?),
         None => None,
     };
     match window {
         WindowMode::Session if gap.is_none() => {
             return Err(SigmaParserError::InvalidCorrelation(
-                "window: session requires a 'gap' (e.g. gap: 5m)".into(),
+                "window: session requires a gap (gap: or rsigma.gap:, e.g. 5m)".into(),
             ));
         }
         WindowMode::Sliding | WindowMode::Tumbling if gap.is_some() => {

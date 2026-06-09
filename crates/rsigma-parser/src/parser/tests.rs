@@ -277,6 +277,70 @@ correlation:
 }
 
 #[test]
+fn test_correlation_window_rsigma_namespace() {
+    // The rsigma.* extension spelling is the primary form for window/gap.
+    let yaml = r#"
+title: Corr
+correlation:
+    type: temporal
+    rules:
+        - a
+        - b
+    group-by:
+        - User
+    timespan: 2h
+rsigma.window: session
+rsigma.gap: 5m
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    let corr = &collection.correlations[0];
+    assert_eq!(corr.window, WindowMode::Session);
+    assert_eq!(corr.gap.as_ref().unwrap().seconds, 300);
+    // The rsigma.* keys also remain available as custom attributes.
+    assert!(corr.custom_attributes.contains_key("rsigma.window"));
+}
+
+#[test]
+fn test_correlation_window_rsigma_overrides_first_class() {
+    // When both spellings are present, rsigma.* wins.
+    let yaml = r#"
+title: Corr
+correlation:
+    type: event_count
+    rules:
+        - base-1
+    group-by:
+        - User
+    timespan: 1h
+    window: sliding
+    condition:
+        gte: 5
+rsigma.window: tumbling
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    assert_eq!(collection.correlations[0].window, WindowMode::Tumbling);
+}
+
+#[test]
+fn test_correlation_rsigma_session_requires_gap() {
+    let yaml = r#"
+title: Corr
+correlation:
+    type: temporal
+    rules:
+        - a
+        - b
+    group-by:
+        - User
+    timespan: 2h
+rsigma.window: session
+"#;
+    let collection = parse_sigma_yaml(yaml).unwrap();
+    assert!(collection.correlations.is_empty());
+    assert!(collection.errors.iter().any(|e| e.contains("gap")));
+}
+
+#[test]
 fn test_parse_correlation_rule_custom_attributes() {
     let yaml = r#"
 title: Login

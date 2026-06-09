@@ -358,6 +358,8 @@ static KEY_CACHE: LazyLock<HashMap<&'static str, Value>> = LazyLock::new(|| {
         "product",
         "references",
         "related",
+        "rsigma.gap",
+        "rsigma.window",
         "rules",
         "scope",
         "selection",
