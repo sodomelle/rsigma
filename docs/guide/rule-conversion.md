@@ -202,6 +202,17 @@ HAVING COUNT(*) >= 3 AND (MAX(time) - MIN(time)) <= INTERVAL '3600 seconds'
 
 The `gap` is honored exactly. The `timespan` cap is enforced as the trailing `HAVING` filter, which drops sessions longer than the cap rather than splitting them mid-session as the runtime engine does; `rsigma backend convert` prints a warning to stderr noting this. Tumbling and session apply to every correlation type. For `temporal`/`temporal_ordered`, the combined detections (the `matched` CTE) are bucketed or sessionized and each window counts the distinct referenced rules with `COUNT(DISTINCT rule_name)`; order is not enforced for `temporal_ordered`, the same limitation as the default temporal path.
 
+#### Choosing the strategy at conversion time
+
+The window strategy can also be selected at conversion time rather than taken from the rule, following pySigma's `correlation_methods` model: the converting user knows the target backend's limits, so they get the final say. The backend advertises its strategies, which `rsigma backend formats postgres` lists, and you pick one with `-O correlation_method=NAME`:
+
+```bash
+# Render every correlation as a session window, regardless of each rule's own window hint
+rsigma backend convert -t postgres -O correlation_method=session rules/
+```
+
+The PostgreSQL backend offers `sliding` (default), `tumbling`, and `session`. The option overrides a rule's own `window` for that conversion; an unknown method is rejected up front. When no option is given, each rule's own `window` (default `sliding`) is used.
+
 ### Multi-table temporal correlations
 
 When a `temporal` correlation references detection rules that target different tables (via per-logsource pipeline routing or the `postgres.table` custom attribute), the backend automatically generates a `UNION ALL` CTE:

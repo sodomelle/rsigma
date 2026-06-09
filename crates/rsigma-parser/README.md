@@ -206,7 +206,12 @@ Correlation rules accept an optional `window` attribute that controls how `times
 - `tumbling`: fixed, boundary-aligned, non-overlapping buckets of size `timespan`.
 - `session`: dynamic window that extends while consecutive in-group events stay within `gap`, capped by `timespan` as the maximum total span. `gap` is required for `session` and must not be set for the other modes.
 
-These map to `CorrelationRule::window` (a `WindowMode` of `Sliding`/`Tumbling`/`Session`) and `CorrelationRule::gap` (an `Option<Timespan>`).
+This is an rsigma extension (a portable-spec version was declined upstream), so the primary spelling is the `rsigma.*` engine-extension namespace, with the bare keys kept as aliases:
+
+- Primary: top-level `rsigma.window` / `rsigma.gap` (alongside `rsigma.suppress`, `rsigma.action`).
+- Alias: nested `correlation.window` / `correlation.gap`.
+
+The `rsigma.*` spelling wins when both are present. Either spelling maps to `CorrelationRule::window` (a `WindowMode` of `Sliding`/`Tumbling`/`Session`) and `CorrelationRule::gap` (an `Option<Timespan>`), so consumers read one place regardless of how the rule was written.
 
 ## Filter Rules
 
