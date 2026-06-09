@@ -147,7 +147,7 @@ pub fn recognize(condition: &str) -> String {
     // match wins (`open_file` over the bare `create_file_supersede`
     // when the condition carries the full three-clause sequence).
     let mut macros: Vec<&MacroClauses> = MACRO_CLAUSES.iter().collect();
-    macros.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    macros.sort_by_key(|m| std::cmp::Reverse(m.1.len()));
 
     let mut out: Vec<String> = Vec::with_capacity(clauses.len());
     let mut i = 0;
