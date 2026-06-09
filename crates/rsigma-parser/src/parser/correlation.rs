@@ -75,6 +75,34 @@ pub(super) fn parse_correlation_rule(
         .ok_or_else(|| SigmaParserError::InvalidCorrelation("Missing timeframe".into()))?;
     let timespan = Timespan::parse(timespan_str)?;
 
+    // Window mode (optional, defaults to sliding) and the session `gap`.
+    let window = match get_str(corr, "window") {
+        Some(w) => w.parse::<WindowMode>().map_err(|_| {
+            SigmaParserError::InvalidCorrelation(format!(
+                "Unknown window mode: {w} (expected sliding, tumbling, or session)"
+            ))
+        })?,
+        None => WindowMode::default(),
+    };
+    let gap = match get_str(corr, "gap") {
+        Some(g) => Some(Timespan::parse(g)?),
+        None => None,
+    };
+    match window {
+        WindowMode::Session if gap.is_none() => {
+            return Err(SigmaParserError::InvalidCorrelation(
+                "window: session requires a 'gap' (e.g. gap: 5m)".into(),
+            ));
+        }
+        WindowMode::Sliding | WindowMode::Tumbling if gap.is_some() => {
+            return Err(SigmaParserError::InvalidCorrelation(format!(
+                "'gap' is only valid with window: session, not window: {}",
+                window.as_str()
+            )));
+        }
+        _ => {}
+    }
+
     // Generate flag - Sigma correlation schema defines `generate` at document root.
     // Nested `correlation.generate` is accepted for backward compatibility.
     let generate = m
@@ -139,6 +167,8 @@ pub(super) fn parse_correlation_rule(
         rules,
         group_by,
         timespan,
+        window,
+        gap,
         condition,
         aliases,
         generate,

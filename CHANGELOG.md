@@ -4,6 +4,16 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
+### Correlation window modes: declarable `sliding`/`tumbling`/`session` windows and a session `gap` (parser, lint, LSP) (#TBD)
+
+rsigma correlation rules can now declare how their `timespan` is anchored to the event stream, via an optional `window` attribute, plus a `gap` field for dynamic session windows. This is the parser-and-validation slice of the feature; runtime evaluation and query conversion follow in later changes. It is the reference implementation of a proposed Sigma enhancement that makes correlation window semantics declarable and adds the gap-based session window the spec cannot express today.
+
+- **New `window` attribute** on the correlation section with three values: `sliding` (the default, equal to today's trailing per-event window, so no existing rule changes meaning), `tumbling` (fixed, boundary-aligned, non-overlapping buckets of size `timespan`), and `session` (a dynamic window that extends while consecutive in-group events stay within `gap`, capped by `timespan` as the maximum total span).
+- **New `gap` attribute** reusing the existing `timespan` grammar (`Xs`/`Xm`/`Xh`/`Xd`/`Xw`/`XM`/`Xy`). It is required when `window: session` and rejected for the other modes. The parser errors on a session window without a gap, a gap without a session window, and an unknown window mode.
+- **Lint rules.** Four new checks: `invalid_window_mode`, `missing_session_gap`, `gap_without_session`, and `invalid_gap_format`. The lint catalogue now lists 74 built-in checks plus the 1 reserved enum value (`empty_filter_rules`).
+- **API.** `rsigma-parser` gains a `WindowMode` enum (`Sliding`/`Tumbling`/`Session`, default `Sliding`) and `window: WindowMode` plus `gap: Option<Timespan>` fields on `CorrelationRule`. The LSP offers a new `correlation-session` snippet.
+- **Backward compatible.** `window` is optional and defaults to `sliding`; `gap` is only valid under `window: session`. No existing rule changes meaning or becomes invalid.
+
 ### `sigma-version`: gate breaking spec changes by the declared specification major (#188)
 
 rsigma now reads an optional top-level `sigma-version` attribute on a Sigma document: the Sigma specification MAJOR version the document targets (for example `sigma-version: 3`). It is the reference implementation of the rule-level spec-version mechanism proposed as [SEP #213](https://github.com/SigmaHQ/sigma-specification/issues/213), split out of array matching so that every future breaking spec change is gated by one declared version rather than a per-feature escape.

@@ -15,6 +15,9 @@ const VALID_CORRELATION_TYPES: &[&str] = &[
 /// Valid condition operators.
 const VALID_CONDITION_OPERATORS: &[&str] = &["gt", "gte", "lt", "lte", "eq", "neq"];
 
+/// Valid window modes.
+const VALID_WINDOW_MODES: &[&str] = &["sliding", "tumbling", "session"];
+
 /// Correlation types that require a condition section.
 const TYPES_REQUIRING_CONDITION: &[&str] = &[
     "event_count",
@@ -118,6 +121,52 @@ pub(crate) fn lint_correlation_rule(m: &yaml_serde::Mapping, warnings: &mut Vec<
             "missing required field 'correlation.timespan'",
             "/correlation/timespan",
         ));
+    }
+
+    // ── window + gap ──────────────────────────────────────────────────────
+    let window = get_str(corr, "window");
+    let window_known = window.is_none_or(|w| VALID_WINDOW_MODES.contains(&w));
+    if let Some(w) = window
+        && !VALID_WINDOW_MODES.contains(&w)
+    {
+        warnings.push(err(
+            LintRule::InvalidWindowMode,
+            format!(
+                "invalid window mode \"{w}\", expected one of: {}",
+                VALID_WINDOW_MODES.join(", ")
+            ),
+            "/correlation/window",
+        ));
+    }
+
+    let gap = get_str(corr, "gap");
+    if let Some(g) = gap
+        && !is_valid_timespan(g)
+    {
+        warnings.push(err(
+            LintRule::InvalidGapFormat,
+            format!("invalid gap \"{g}\", expected format like 5m, 1h, 30s, 7d"),
+            "/correlation/gap",
+        ));
+    }
+
+    // Only reason about the gap/window relationship when the window is a known
+    // value; an invalid mode is already reported by InvalidWindowMode.
+    if window_known {
+        let is_session = window == Some("session");
+        if is_session && gap.is_none() {
+            warnings.push(err(
+                LintRule::MissingSessionGap,
+                "window: session requires a 'gap' (e.g. gap: 5m)",
+                "/correlation/gap",
+            ));
+        } else if !is_session && gap.is_some() {
+            warnings.push(err(
+                LintRule::GapWithoutSession,
+                "'gap' is only valid with window: session",
+                "/correlation/gap",
+            ));
+        }
     }
 
     // ── Conditional requirements per correlation type ─────────────────────
@@ -395,5 +444,107 @@ correlation:
         assert!(is_valid_timespan("1w"));
         assert!(is_valid_timespan("1M"));
         assert!(is_valid_timespan("1y"));
+    }
+
+    #[test]
+    fn invalid_window_mode() {
+        let w = lint(
+            r#"
+title: Test
+correlation:
+    type: event_count
+    rules:
+        - some-rule
+    group-by:
+        - User
+    timespan: 1h
+    window: rolling
+    condition:
+        gte: 10
+"#,
+        );
+        assert!(has_rule(&w, LintRule::InvalidWindowMode));
+    }
+
+    #[test]
+    fn missing_session_gap() {
+        let w = lint(
+            r#"
+title: Test
+correlation:
+    type: temporal
+    rules:
+        - a
+        - b
+    group-by:
+        - User
+    timespan: 2h
+    window: session
+"#,
+        );
+        assert!(has_rule(&w, LintRule::MissingSessionGap));
+    }
+
+    #[test]
+    fn gap_without_session() {
+        let w = lint(
+            r#"
+title: Test
+correlation:
+    type: event_count
+    rules:
+        - some-rule
+    group-by:
+        - User
+    timespan: 1h
+    gap: 5m
+    condition:
+        gte: 10
+"#,
+        );
+        assert!(has_rule(&w, LintRule::GapWithoutSession));
+    }
+
+    #[test]
+    fn invalid_gap_format() {
+        let w = lint(
+            r#"
+title: Test
+correlation:
+    type: temporal
+    rules:
+        - a
+        - b
+    group-by:
+        - User
+    timespan: 2h
+    window: session
+    gap: 5minutes
+"#,
+        );
+        assert!(has_rule(&w, LintRule::InvalidGapFormat));
+    }
+
+    #[test]
+    fn valid_session_window_no_errors() {
+        let w = lint(
+            r#"
+title: Test
+correlation:
+    type: temporal
+    rules:
+        - a
+        - b
+    group-by:
+        - User
+    timespan: 2h
+    window: session
+    gap: 5m
+"#,
+        );
+        assert!(!has_rule(&w, LintRule::InvalidWindowMode));
+        assert!(!has_rule(&w, LintRule::MissingSessionGap));
+        assert!(!has_rule(&w, LintRule::GapWithoutSession));
+        assert!(!has_rule(&w, LintRule::InvalidGapFormat));
     }
 }

@@ -937,6 +937,8 @@ fn test_compile_correlation_with_custom_attributes() {
         rules: vec!["rule-1".to_string()],
         group_by: vec!["User".to_string()],
         timespan: Timespan::parse("60s").unwrap(),
+        window: WindowMode::Sliding,
+        gap: None,
         condition: CorrelationCondition::Threshold {
             predicates: vec![(ConditionOperator::Gte, 5)],
             field: None,
