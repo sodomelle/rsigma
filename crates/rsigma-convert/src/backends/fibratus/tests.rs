@@ -43,13 +43,11 @@ fn convert_with(yaml: &str, backend: &FibratusBackend, format: &str) -> Vec<Stri
 
 #[test]
 fn field_eq_string_default_case_insensitive() {
-    // Sigma defaults to case-insensitive matching. Fibratus's bare `=`
-    // is case-sensitive, so an unmodified `field: value` must lower to
-    // exact-equality on the literal value (no wildcards, no `|cased`,
-    // so the equality is fine even though Fibratus's `=` is
-    // case-sensitive: Sigma's "case-insensitive" semantics for plain
-    // equality match the literal value byte-for-byte). The `i`-prefixed
-    // operators only kick in for partial-match modifiers.
+    // Sigma defaults to case-insensitive string matching, and Fibratus's
+    // bare `=` is case-sensitive. Plain equality therefore routes
+    // through `imatches`, which is a literal-equality glob without
+    // wildcards and preserves Sigma's case-insensitive semantics
+    // (matches `cmd.exe` and `CMD.EXE`).
     let q = convert(
         r#"
 title: T
@@ -59,7 +57,23 @@ detection:
   condition: s
 "#,
     );
-    assert_eq!(q, vec!["ps.name = 'cmd.exe'"]);
+    assert_eq!(q, vec!["ps.name imatches 'cmd.exe'"]);
+}
+
+#[test]
+fn field_eq_string_cased_modifier_uses_matches() {
+    // The `|cased` modifier flips to the case-sensitive `matches`
+    // operator (still a literal-equality glob, just case-sensitive).
+    let q = convert(
+        r#"
+title: T
+detection:
+  s:
+    ps.name|cased: Cmd.exe
+  condition: s
+"#,
+    );
+    assert_eq!(q, vec!["ps.name matches 'Cmd.exe'"]);
 }
 
 #[test]
@@ -183,7 +197,7 @@ detection:
     );
     assert_eq!(
         q,
-        vec!["ps.name = 'cmd.exe' and ps.parent.name = 'explorer.exe'"]
+        vec!["ps.name imatches 'cmd.exe' and ps.parent.name imatches 'explorer.exe'"]
     );
 }
 
@@ -203,7 +217,10 @@ detection:
     // Multi-child OR groups are always parenthesized so the standard
     // Sigma precedence (AND binds tighter than OR) survives any
     // surrounding AND context. Harmless at top level.
-    assert_eq!(q, vec!["(ps.name = 'cmd.exe' or ps.name = 'pwsh.exe')"]);
+    assert_eq!(
+        q,
+        vec!["(ps.name imatches 'cmd.exe' or ps.name imatches 'pwsh.exe')"]
+    );
 }
 
 #[test]
@@ -221,7 +238,7 @@ detection:
     );
     assert_eq!(
         q,
-        vec!["ps.name = 'cmd.exe' and not (ps.parent.name = 'explorer.exe')"]
+        vec!["ps.name imatches 'cmd.exe' and not (ps.parent.name imatches 'explorer.exe')"]
     );
 }
 
@@ -243,7 +260,7 @@ detection:
     assert_eq!(
         q,
         vec![
-            "ps.name = 'cmd.exe' and (ps.parent.name = 'explorer.exe' or ps.parent.name = 'services.exe')"
+            "ps.name imatches 'cmd.exe' and (ps.parent.name imatches 'explorer.exe' or ps.parent.name imatches 'services.exe')"
         ]
     );
 }
@@ -272,7 +289,10 @@ detection:
   condition: s
 "#,
     );
-    assert_eq!(q, vec!["(ps.name = 'cmd.exe' or ps.name = 'pwsh.exe')"]);
+    assert_eq!(
+        q,
+        vec!["(ps.name imatches 'cmd.exe' or ps.name imatches 'pwsh.exe')"]
+    );
 }
 
 #[test]
@@ -430,7 +450,7 @@ detection:
     );
     assert_eq!(
         q,
-        vec!["ps.name = 'cmd.exe' and not (regex(ps.cmdline, '^safe') = true)"]
+        vec!["ps.name imatches 'cmd.exe' and not (regex(ps.cmdline, '^safe') = true)"]
     );
 }
 
@@ -454,7 +474,7 @@ detection:
     );
     assert_eq!(
         q,
-        vec!["ps.name = 'a.exe' and (ps.name = 'b.exe' or ps.name = 'c.exe')"]
+        vec!["ps.name imatches 'a.exe' and (ps.name imatches 'b.exe' or ps.name imatches 'c.exe')"]
     );
 }
 
@@ -596,7 +616,9 @@ detection:
     assert!(doc.contains("id: 11111111-2222-3333-4444-555555555555\n"));
     assert!(doc.contains("description: |\n  Detect cmd.exe spawned by explorer.\n"));
     assert!(doc.contains("tactic.id: TA0002\n"));
-    assert!(doc.contains("condition: ps.name = 'cmd.exe' and ps.parent.name = 'explorer.exe'\n"));
+    assert!(doc.contains(
+        "condition: ps.name imatches 'cmd.exe' and ps.parent.name imatches 'explorer.exe'\n"
+    ));
     assert!(doc.contains("min-engine-version: 3.0.0\n"));
 }
 
@@ -703,7 +725,10 @@ detection:
 
     assert_eq!(q.len(), 1);
     let out = &q[0];
-    assert!(out.contains("evt.name = 'CreateProcess'"), "got: {out}");
+    assert!(
+        out.contains("evt.name imatches 'CreateProcess'"),
+        "got: {out}"
+    );
     // The Sigma source `'\cmd.exe'` parses as the literal `\cmd.exe`;
     // Fibratus single-quoted strings need `\\` for a literal `\`, so
     // the rendered value carries the double-escape.
@@ -737,7 +762,7 @@ detection:
     let q = backend.convert_rule(rule, "expr", &state).unwrap();
 
     let out = &q[0];
-    assert!(out.contains("evt.name = 'Connect'"), "got: {out}");
+    assert!(out.contains("evt.name imatches 'Connect'"), "got: {out}");
     assert!(
         out.contains("cidr_contains(net.dip, '10.0.0.0/8')"),
         "got: {out}",
@@ -766,7 +791,10 @@ detection:
     let q = backend.convert_rule(rule, "expr", &state).unwrap();
 
     let out = &q[0];
-    assert!(out.contains("evt.name = 'RegSetValue'"), "got: {out}");
+    assert!(
+        out.contains("evt.name imatches 'RegSetValue'"),
+        "got: {out}"
+    );
     assert!(
         out.contains(r"registry.path icontains '\\CurrentVersion\\Run\\'"),
         "got: {out}",

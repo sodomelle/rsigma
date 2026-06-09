@@ -35,10 +35,10 @@ Verified against the Fibratus backend's unit tests at [`crates/rsigma-convert/sr
 
 | Sigma feature | Fibratus filter expression |
 |---------------|----------------------------|
-| Field equality | `field = 'value'` (Fibratus `=` is case-sensitive; Sigma's case-insensitive default for plain equality is preserved because the literal value still matches the literal stored value byte-for-byte). |
-| `contains` modifier | `field icontains 'value'` (case-insensitive default); `field contains 'value'` with `|cased`. |
-| `startswith` / `endswith` modifier | `field istartswith 'value'` / `field iendswith 'value'`; bare form with `|cased`. |
-| Wildcards (`*`, `?`) in the value | `field imatches '*pat?ern*'`; bare `matches` with `|cased`. |
+| Field equality | `field imatches 'value'` (Sigma defaults to case-insensitive string matching; `imatches` without wildcards is a literal-equality glob and preserves the semantics). With `\|cased`: `field matches 'value'`. |
+| `contains` modifier | `field icontains 'value'` (case-insensitive default); `field contains 'value'` with `\|cased`. |
+| `startswith` / `endswith` modifier | `field istartswith 'value'` / `field iendswith 'value'`; bare form with `\|cased`. |
+| Wildcards (`*`, `?`) in the value | `field imatches '*pat?ern*'`; bare `matches` with `\|cased`. |
 | Regex (`re` modifier) | `regex(field, 'pattern') = true`; the negated form is `not regex(field, 'pattern') = true`. Patterns using lookarounds (`(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)`) or backreferences are rejected up-front with `UnsupportedModifier`. |
 | CIDR (`cidr` modifier) | `cidr_contains(field, '10.0.0.0/8')`. |
 | Numeric compare (`gt`/`gte`/`lt`/`lte`) | `field > N`, `field >= N`, `field < N`, `field <= N`. |
@@ -122,7 +122,7 @@ labels:
   tactic.ref: 'https://attack.mitre.org/tactics/TA0002/'
 condition: >
   ps.exe iendswith '\\cmd.exe' and ps.parent.exe iendswith '\\explorer.exe'
-  and ps.cmdline icontains 'whoami' and evt.name = 'CreateProcess'
+  and ps.cmdline icontains 'whoami' and evt.name imatches 'CreateProcess'
 min-engine-version: 3.0.0
 ```
 
@@ -131,7 +131,7 @@ min-engine-version: 3.0.0
 Filter expression only, no YAML envelope. Useful for piping into ad-hoc Fibratus run commands:
 
 ```text
-ps.exe iendswith '\\cmd.exe' and ps.parent.exe iendswith '\\explorer.exe' and ps.cmdline icontains 'whoami' and evt.name = 'CreateProcess'
+ps.exe iendswith '\\cmd.exe' and ps.parent.exe iendswith '\\explorer.exe' and ps.cmdline icontains 'whoami' and evt.name imatches 'CreateProcess'
 ```
 
 ## Correlation rules
@@ -165,11 +165,11 @@ labels:
 condition: >
   sequence
   maxspan 5m
-    |evt.name = 'AuthFail'
+    |evt.name imatches 'AuthFail'
     | by net.sip
-    |evt.name = 'AuthFail'
+    |evt.name imatches 'AuthFail'
     | by net.sip
-    |evt.name = 'AuthFail'
+    |evt.name imatches 'AuthFail'
     | by net.sip
 min-engine-version: 3.0.0
 ```

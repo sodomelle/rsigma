@@ -514,9 +514,9 @@ correlation:
         assert_eq!(q.len(), 1);
         let body = &q[0];
         assert!(body.starts_with("sequence\nmaxspan 1m\n"));
-        assert!(body.contains("|evt.name = 'Connect'\n"));
+        assert!(body.contains("|evt.name imatches 'Connect'\n"));
         assert!(body.contains("| by ps.pid"));
-        assert!(body.contains("|evt.name = 'CreateProcess'\n"));
+        assert!(body.contains("|evt.name imatches 'CreateProcess'\n"));
     }
 
     #[test]
@@ -623,7 +623,7 @@ correlation:
         let body = &q[0];
         assert!(body.starts_with("sequence\nmaxspan 5m\n"));
         // 3 repeated stages each followed by `| by net.sip`.
-        let stages = body.matches("|evt.name = 'AuthFail'\n").count();
+        let stages = body.matches("|evt.name imatches 'AuthFail'\n").count();
         assert_eq!(stages, 3, "want 3 repeated stages, got: {body}");
         let bys = body.matches("| by net.sip").count();
         assert_eq!(bys, 3, "want 3 by-clauses, got: {body}");
@@ -678,7 +678,7 @@ correlation:
 "#)
         .unwrap();
         // gt: 2 means at-least-3 occurrences; expect 3 repeated stages.
-        let stages = q[0].matches("|evt.name = 'X'\n").count();
+        let stages = q[0].matches("|evt.name imatches 'X'\n").count();
         assert_eq!(stages, 3);
     }
 

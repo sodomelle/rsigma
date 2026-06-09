@@ -132,7 +132,7 @@ fn convert_simple_rule_to_fibratus_expr_format() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("evt.name = 'CreateProcess'"),
+        stdout.contains("evt.name imatches 'CreateProcess'"),
         "stdout missing CreateProcess: {stdout}",
     );
     assert!(

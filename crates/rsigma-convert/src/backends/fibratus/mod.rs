@@ -370,6 +370,20 @@ impl Backend for FibratusBackend {
         let is_endswith = mods.contains(&Modifier::EndsWith);
 
         // Modifier dispatch in the same order the generic helper uses.
+        //
+        // String equality routes through `matches`/`imatches` rather than
+        // the bare `=` operator because Sigma string comparisons are
+        // case-insensitive by default. Fibratus's `=` is case-sensitive
+        // (only `i`-prefixed operators are not), so a Sigma rule like
+        // `Image: cmd.exe` must lower to `ps.exe imatches 'cmd.exe'`
+        // (matches `cmd.exe` and `CMD.EXE`) and `Image|cased: cmd.exe`
+        // to `ps.exe matches 'cmd.exe'` (case-sensitive). `matches`
+        // without wildcards is a literal-equality glob, so the semantics
+        // are exact equality with the correct case-handling.
+        //
+        // The bare `=` operator is reserved for numeric/boolean/null
+        // values where case-insensitivity is not meaningful; those go
+        // through `convert_field_eq_num`/`_bool`/`_null` directly.
         let template = match (is_cased, is_contains, is_startswith, is_endswith) {
             (true, true, _, _) => self.config.case_sensitive_contains_expression,
             (true, _, true, _) => self.config.case_sensitive_startswith_expression,
@@ -378,17 +392,7 @@ impl Backend for FibratusBackend {
             (false, true, _, _) => self.config.contains_expression,
             (false, _, true, _) => self.config.startswith_expression,
             (false, _, _, true) => self.config.endswith_expression,
-            (false, false, false, false) => {
-                if shared::has_wildcards(value) {
-                    self.config.wildcard_match_expression
-                } else {
-                    // Bare equality: `field = 'value'`.
-                    return Ok(ConvertResult::Query(format!(
-                        "{f}{}{val}",
-                        self.config.eq_token
-                    )));
-                }
-            }
+            (false, false, false, false) => self.config.wildcard_match_expression,
         };
 
         let expr = template.ok_or_else(|| {
