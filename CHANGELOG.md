@@ -4,14 +4,15 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
-### Correlation window modes: declarable `sliding`/`tumbling`/`session` windows and a session `gap` (parser, lint, LSP) (#192)
+### Correlation window modes: declarable `sliding`/`tumbling`/`session` windows and a session `gap` (#192)
 
-rsigma correlation rules can now declare how their `timespan` is anchored to the event stream, via an optional `window` attribute, plus a `gap` field for dynamic session windows. This is the parser-and-validation slice of the feature; runtime evaluation and query conversion follow in later changes. It is the reference implementation of a proposed Sigma enhancement that makes correlation window semantics declarable and adds the gap-based session window the spec cannot express today.
+rsigma correlation rules can now declare how their `timespan` is anchored to the event stream, via an optional `window` attribute, plus a `gap` field for dynamic session windows. It is the reference implementation of a proposed Sigma enhancement that makes correlation window semantics declarable and adds the gap-based session window the spec cannot express today. Query conversion for the new modes follows in a later change.
 
 - **New `window` attribute** on the correlation section with three values: `sliding` (the default, equal to today's trailing per-event window, so no existing rule changes meaning), `tumbling` (fixed, boundary-aligned, non-overlapping buckets of size `timespan`), and `session` (a dynamic window that extends while consecutive in-group events stay within `gap`, capped by `timespan` as the maximum total span).
 - **New `gap` attribute** reusing the existing `timespan` grammar (`Xs`/`Xm`/`Xh`/`Xd`/`Xw`/`XM`/`Xy`). It is required when `window: session` and rejected for the other modes. The parser errors on a session window without a gap, a gap without a session window, and an unknown window mode.
+- **Runtime evaluation.** The correlation engine honors all three modes: `sliding` keeps the existing trailing per-event window, `tumbling` resets per-group state on epoch-aligned bucket boundaries, and `session` keeps a window open while consecutive in-group events stay within `gap`, restarting after a gap of inactivity or once the total span would exceed `timespan`. The same window logic applies to chained correlations and to event-inclusion buffers. Window bookkeeping is derived from the existing per-group timestamps, so persisted daemon state (snapshots) stays format-compatible and survives upgrades.
 - **Lint rules.** Four new checks: `invalid_window_mode`, `missing_session_gap`, `gap_without_session`, and `invalid_gap_format`. The lint catalogue now lists 74 built-in checks plus the 1 reserved enum value (`empty_filter_rules`).
-- **API.** `rsigma-parser` gains a `WindowMode` enum (`Sliding`/`Tumbling`/`Session`, default `Sliding`) and `window: WindowMode` plus `gap: Option<Timespan>` fields on `CorrelationRule`. The LSP offers a new `correlation-session` snippet.
+- **API.** `rsigma-parser` gains a `WindowMode` enum (`Sliding`/`Tumbling`/`Session`, default `Sliding`) and `window: WindowMode` plus `gap: Option<Timespan>` fields on `CorrelationRule`. `rsigma-eval` adds `window_mode` and `gap_secs` to `CompiledCorrelation` and an `apply_window_open` helper. The LSP offers a new `correlation-session` snippet.
 - **Backward compatible.** `window` is optional and defaults to `sliding`; `gap` is only valid under `window: session`. No existing rule changes meaning or becomes invalid.
 
 ### `sigma-version`: gate breaking spec changes by the declared specification major (#188)

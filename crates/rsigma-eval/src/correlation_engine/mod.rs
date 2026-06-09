@@ -25,7 +25,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use rsigma_parser::{CorrelationRule, CorrelationType, SigmaCollection, SigmaRule};
 
 use crate::correlation::{
-    CompiledCorrelation, EventBuffer, EventRefBuffer, GroupKey, WindowState, compile_correlation,
+    CompiledCorrelation, EventBuffer, EventRefBuffer, GroupKey, WindowState, apply_window_open,
+    compile_correlation,
 };
 use crate::engine::Engine;
 use crate::error::{EvalError, Result};
@@ -650,6 +651,8 @@ impl CorrelationEngine {
         let corr = &self.correlations[corr_idx];
         let corr_type = corr.correlation_type;
         let timespan = corr.timespan_secs;
+        let window_mode = corr.window_mode;
+        let gap_secs = corr.gap_secs;
         let level = corr.level;
         let suppress_secs = corr.suppress_secs.or(self.config.suppress);
         let action = corr.action.unwrap_or(self.config.action_on_match);
@@ -676,9 +679,11 @@ impl CorrelationEngine {
             .entry(state_key.clone())
             .or_insert_with(|| WindowState::new_for(corr_type));
 
-        // Evict expired entries
+        // Apply the window's pre-insert maintenance (sliding evict, tumbling
+        // bucket reset, or session gap/cap reset). `reset` is true when the
+        // window rolled over, so the event buffers below are cleared in sync.
         let cutoff = ts - timespan as i64;
-        state.evict(cutoff);
+        let reset = apply_window_open(state, ts, timespan, window_mode, gap_secs);
 
         // Push the new event into the state
         match corr_type {
@@ -709,14 +714,20 @@ impl CorrelationEngine {
             }
         }
 
-        // Push event into buffer based on event mode
+        // Push event into buffer based on event mode. Keep the buffer's retained
+        // events aligned with the window state: sliding evicts by the trailing
+        // cutoff, while tumbling/session clear the buffer when the window reset.
         match event_mode {
             CorrelationEventMode::Full => {
                 let buf = self
                     .event_buffers
                     .entry(state_key.clone())
                     .or_insert_with(|| EventBuffer::new(max_events));
-                buf.evict(cutoff);
+                if window_mode == rsigma_parser::WindowMode::Sliding {
+                    buf.evict(cutoff);
+                } else if reset {
+                    buf.clear();
+                }
                 let json = event.to_json();
                 buf.push(ts, &json);
             }
@@ -725,7 +736,11 @@ impl CorrelationEngine {
                     .event_ref_buffers
                     .entry(state_key.clone())
                     .or_insert_with(|| EventRefBuffer::new(max_events));
-                buf.evict(cutoff);
+                if window_mode == rsigma_parser::WindowMode::Sliding {
+                    buf.evict(cutoff);
+                } else if reset {
+                    buf.clear();
+                }
                 let json = event.to_json();
                 buf.push(ts, &json);
             }
@@ -857,6 +872,8 @@ impl CorrelationEngine {
                 let corr = &self.correlations[corr_idx];
                 let corr_type = corr.correlation_type;
                 let timespan = corr.timespan_secs;
+                let window_mode = corr.window_mode;
+                let gap_secs = corr.gap_secs;
                 let level = corr.level;
 
                 let group_key = GroupKey::from_pairs(&group_key_pairs, &corr.group_by);
@@ -866,8 +883,7 @@ impl CorrelationEngine {
                     .entry(state_key)
                     .or_insert_with(|| WindowState::new_for(corr_type));
 
-                let cutoff = ts - timespan as i64;
-                state.evict(cutoff);
+                apply_window_open(state, ts, timespan, window_mode, gap_secs);
 
                 match corr_type {
                     CorrelationType::EventCount => {
