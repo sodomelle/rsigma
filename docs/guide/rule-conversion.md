@@ -1,8 +1,8 @@
 # Rule Conversion
 
-`rsigma backend convert` translates Sigma rules into queries for a specific log analytics backend. Instead of evaluating rules against live events, conversion produces query strings that you can run against an existing log store: PostgreSQL/TimescaleDB, LynxDB, and any future backend that implements the `Backend` trait. This is the right path for historical threat hunting and for retroactive coverage testing against months of already-collected logs.
+`rsigma backend convert` translates Sigma rules into queries for a specific log analytics backend. Instead of evaluating rules against live events, conversion produces query strings that you can run against an existing log store: PostgreSQL/TimescaleDB, LynxDB, Fibratus, and any future backend that implements the `Backend` trait. This is the right path for historical threat hunting and for retroactive coverage testing against months of already-collected logs.
 
-This page covers the two production backends, their output formats and backend options, multi-table correlation, and the workflow for integrating converted queries into Grafana, dashboards, or SOAR playbooks.
+This page covers the production backends, their output formats and backend options, multi-table correlation, and the workflow for integrating converted queries into Grafana, dashboards, or SOAR playbooks.
 
 ## When to convert instead of evaluate
 
@@ -13,6 +13,7 @@ This page covers the two production backends, their output formats and backend o
 | Build a Grafana dashboard from Sigma rules. | `backend convert -t postgres -f view` and add the views as Grafana panels. |
 | Generate a TimescaleDB continuous aggregate from a correlation rule. | `backend convert -t postgres -f continuous_aggregate`. |
 | Forward Sigma rules to LynxDB. | `backend convert -t lynxdb`. |
+| Generate Fibratus rule YAML for a Windows EDR sensor. | `backend convert -t fibratus -p fibratus_windows`. |
 
 The output of conversion is plain text on stdout, one query per rule. Pipe it into `psql`, save it to a versioned `.sql` file, or wrap it in a deployment pipeline.
 
@@ -28,6 +29,7 @@ rsigma backend targets
 Available conversion targets:
   postgres  - PostgreSQL/TimescaleDB (aliases: postgresql, pg)
   lynxdb    - LynxDB log analytics engine
+  fibratus  - Fibratus Windows kernel-event detection engine
   test      - Backend-neutral test backend
 ```
 
@@ -268,6 +270,46 @@ transformations:
 rsigma backend convert rules/ -t lynxdb -p pipeline.yml
 # Output: FROM security_logs | search ...
 ```
+
+## Fibratus
+
+The Fibratus backend produces Fibratus rule YAML — the format consumed by [Fibratus](https://github.com/rabbitstack/fibratus), an Apache-2.0 Windows kernel-event detection and EDR engine. Unlike the other two backends, Fibratus is a runtime sensor rather than a log store, so the converted rules drop directly into a Fibratus installation's `Rules/` directory and the upstream loader runs them in-place.
+
+| Sigma feature | Fibratus syntax |
+|---------------|------------------|
+| Field equality | `field = 'value'` |
+| `contains` / `startswith` / `endswith` | `field icontains 'value'`, `field istartswith 'value'`, `field iendswith 'value'` (case-insensitive by default; bare forms with `\|cased`) |
+| Wildcards (`*`, `?`) | `field imatches '*pat?ern*'` |
+| Regex (`re` modifier) | `regex(field, 'pattern') = true` |
+| CIDR (`cidr` modifier) | `cidr_contains(field, '10.0.0.0/8')` |
+| Numeric compare | `field > N`, `field >= N`, ... |
+| `exists` / `null` | `field != null` / `field = null` |
+| Fieldref | `field1 = field2` (native) |
+| Boolean AND/OR/NOT | Lowercase tokens, with OR groups inside AND explicitly parenthesized |
+| IN-list helper | `field iin ('a', 'b')` (`in` with `\|cased`) |
+
+Always pair the backend with the bundled `fibratus_windows` pipeline so Sigma's PascalCase fields (`Image`, `CommandLine`, `TargetFilename`, `TargetObject`, `DestinationIp`, ...) map to Fibratus's lowercase-dotted vocabulary (`ps.exe`, `ps.cmdline`, `file.path`, `registry.path`, `net.dip`) and so each logsource category is rewritten with the matching `evt.name` discriminator (`process_creation` -> `CreateProcess`, `network_connection` -> `Connect`, `dns_query` -> `QueryDns`, ...):
+
+```bash
+rsigma backend convert rules/windows/process_creation/ -t fibratus -p fibratus_windows
+```
+
+Two output formats: `default` (also aliased as `yaml`/`rule`) emits a complete YAML rule document per Sigma rule with the `name`/`id`/`description`/`labels`/`condition`/`min-engine-version`/`action` envelope, with `---` separators when multiple rules are converted at once. `expr` strips the envelope and emits only the bare filter expression for piping into ad-hoc Fibratus commands.
+
+Backend options (`-O key=value`):
+
+```bash
+# Generate rules that auto-kill the offending process when they fire.
+rsigma backend convert rules/ -t fibratus -p fibratus_windows -O action=kill
+
+# Drop the description/labels block for a minimal rule envelope.
+rsigma backend convert rules/ -t fibratus -p fibratus_windows -O emit_metadata=false
+
+# Force case-sensitive operators globally (equivalent to setting |cased on every value).
+rsigma backend convert rules/ -t fibratus -p fibratus_windows -O case_sensitive=true
+```
+
+Correlation rules lower to Fibratus's inline `sequence` DSL: `temporal_ordered` and `temporal` become a sequence with one stage per referenced rule; small-threshold `event_count` / `value_count` rules expand into repeated/distinct stages capped at `-O max_repeated_slots` (default 5). The four math-aggregate types (`value_sum`/`value_avg`/`value_percentile`/`value_median`) return `UnsupportedCorrelation` because Fibratus has no running-sum or quantile primitive. See the [Fibratus backend reference](../reference/backends/fibratus.md) for the full coverage matrix and an end-to-end correlation example.
 
 ## Selecting columns with `fields:`
 

@@ -26,6 +26,7 @@ The crate provides a generic conversion framework that any backend can plug into
 | Test | `test` | Backend-neutral text queries for foundation testing |
 | PostgreSQL | `postgres`, `postgresql`, `pg` | Native PostgreSQL SQL with TimescaleDB support |
 | LynxDB | `lynxdb` | SPL2-compatible search queries for LynxDB log analytics engine |
+| Fibratus | `fibratus` | Fibratus rule YAML for the Apache-2.0 Windows kernel-event detection and EDR engine |
 
 ## Usage
 

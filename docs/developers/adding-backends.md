@@ -6,7 +6,7 @@ The `Backend` trait in [`rsigma-convert`](../library/convert.md) is the plug-in 
 
 Two flavours of backend, depending on how much pySigma-style boilerplate you want to inherit:
 
-1. **Text-query backend.** Set `text_query_config()` to a `TextQueryConfig` and let the trait's default methods walk the condition AST for you. This is how `PostgresBackend` and `LynxDbBackend` are built. Use this if your target language is a flat boolean expression with `field op value` shapes.
+1. **Text-query backend.** Set `text_query_config()` to a `TextQueryConfig` and let the trait's default methods walk the condition AST for you. This is how `PostgresBackend`, `LynxDbBackend`, and `FibratusBackend` are built. Use this if your target language is a flat boolean expression with `field op value` shapes.
 2. **Custom backend.** Override `convert_rule` outright. Use this when your target language has fundamentally different structure (a tree-shaped JSON DSL like Elasticsearch query DSL, or a pipeline of stages like Splunk SPL).
 
 Most SIEMs fit shape 1.
@@ -17,6 +17,7 @@ Step 1: scaffold the crate module.
 
 ```text
 crates/rsigma-convert/src/backends/
+├── fibratus/
 ├── lynxdb/
 ├── postgres/
 ├── splunk/                  ← new
@@ -185,4 +186,4 @@ Three places to update:
 
 - [`rsigma-convert` README](https://github.com/timescale/rsigma/blob/main/crates/rsigma-convert/README.md) for the full `Backend` trait surface and the existing pySigma-equivalent class variables.
 - [Rule Conversion](../guide/rule-conversion.md) for the user-facing CLI flow.
-- [PostgreSQL backend reference](../reference/backends/postgres.md) and [LynxDB backend reference](../reference/backends/lynxdb.md) for the two shipped reference implementations.
+- [PostgreSQL backend reference](../reference/backends/postgres.md), [LynxDB backend reference](../reference/backends/lynxdb.md), and [Fibratus backend reference](../reference/backends/fibratus.md) for the three shipped reference implementations.
