@@ -1,0 +1,370 @@
+# Fibratus Windows logsource pipeline.
+#
+# Maps Sigma's Windows logsource categories (process_creation,
+# network_connection, file_event, image_load, registry_set, dns_query,
+# pipe_created, create_remote_thread) to Fibratus kernel-event names
+# (`evt.name = 'CreateProcess'`, `evt.name = 'Connect'`, ...) and renames
+# Sigma's PascalCase fields (`Image`, `CommandLine`, `TargetFilename`,
+# `TargetObject`, `DestinationIp`, ...) to the lowercase-dotted Fibratus
+# vocabulary (`ps.exe`, `ps.cmdline`, `file.path`, `registry.path`,
+# `net.dip`, ...).
+#
+# Use this pipeline when converting Sigma Windows rules to Fibratus rule
+# YAML so the output matches the upstream rules-library style and the
+# Fibratus loader accepts the conditions without manual editing.
+#
+# Usage:
+#   rsigma backend convert -t fibratus -p fibratus_windows rules/windows/process_creation/
+
+name: fibratus_windows
+priority: 20
+
+transformations:
+  # --- Process creation ---
+  - id: fibratus_process_creation_fields
+    type: field_name_mapping
+    mapping:
+      Image: ps.exe
+      OriginalFileName: ps.exe
+      CommandLine: ps.cmdline
+      CurrentDirectory: ps.cwd
+      ProcessId: ps.pid
+      ParentImage: ps.parent.exe
+      ParentProcessId: ps.ppid
+      ParentCommandLine: ps.parent.cmdline
+      User: ps.username
+      IntegrityLevel: ps.integrity_level
+      LogonId: ps.sessionid
+    rule_conditions:
+      - type: logsource
+        category: process_creation
+        product: windows
+
+  - id: fibratus_process_creation_event
+    type: add_condition
+    conditions:
+      evt.name: CreateProcess
+    rule_conditions:
+      - type: logsource
+        category: process_creation
+        product: windows
+
+  # --- Process termination ---
+  - id: fibratus_process_termination_fields
+    type: field_name_mapping
+    mapping:
+      Image: ps.exe
+      ProcessId: ps.pid
+    rule_conditions:
+      - type: logsource
+        category: process_termination
+        product: windows
+
+  - id: fibratus_process_termination_event
+    type: add_condition
+    conditions:
+      evt.name: TerminateProcess
+    rule_conditions:
+      - type: logsource
+        category: process_termination
+        product: windows
+
+  # --- File events ---
+  - id: fibratus_file_event_fields
+    type: field_name_mapping
+    mapping:
+      TargetFilename: file.path
+      Image: ps.exe
+      ProcessId: ps.pid
+      User: ps.username
+    rule_conditions:
+      - type: logsource
+        category: file_event
+        product: windows
+
+  - id: fibratus_file_event_condition
+    type: add_condition
+    conditions:
+      evt.name: CreateFile
+    rule_conditions:
+      - type: logsource
+        category: file_event
+        product: windows
+
+  # --- File delete ---
+  - id: fibratus_file_delete_fields
+    type: field_name_mapping
+    mapping:
+      TargetFilename: file.path
+      Image: ps.exe
+      ProcessId: ps.pid
+    rule_conditions:
+      - type: logsource
+        category: file_delete
+        product: windows
+
+  - id: fibratus_file_delete_condition
+    type: add_condition
+    conditions:
+      evt.name: DeleteFile
+    rule_conditions:
+      - type: logsource
+        category: file_delete
+        product: windows
+
+  # --- Network connection ---
+  - id: fibratus_network_connection_fields
+    type: field_name_mapping
+    mapping:
+      Image: ps.exe
+      ProcessId: ps.pid
+      User: ps.username
+      DestinationIp: net.dip
+      DestinationHostname: net.host
+      DestinationPort: net.dport
+      DestinationPortName: net.dport_name
+      SourceIp: net.sip
+      SourcePort: net.sport
+      Protocol: net.l4_proto
+      Initiated: net.is_outbound
+    rule_conditions:
+      - type: logsource
+        category: network_connection
+        product: windows
+
+  - id: fibratus_network_connection_event
+    type: add_condition
+    conditions:
+      evt.name: Connect
+    rule_conditions:
+      - type: logsource
+        category: network_connection
+        product: windows
+
+  # --- DNS query ---
+  - id: fibratus_dns_query_fields
+    type: field_name_mapping
+    mapping:
+      QueryName: net.dns.name
+      QueryStatus: net.dns.rcode
+      QueryResults: net.dns.answers
+      Image: ps.exe
+      ProcessId: ps.pid
+    rule_conditions:
+      - type: logsource
+        category: dns_query
+        product: windows
+
+  - id: fibratus_dns_query_event
+    type: add_condition
+    conditions:
+      evt.name: QueryDns
+    rule_conditions:
+      - type: logsource
+        category: dns_query
+        product: windows
+
+  # --- Image / DLL load ---
+  - id: fibratus_image_load_fields
+    type: field_name_mapping
+    mapping:
+      ImageLoaded: image.path
+      OriginalFileName: image.path
+      Image: ps.exe
+      ProcessId: ps.pid
+      Signed: image.signature.exists
+      SignatureStatus: image.signature.status
+      Signature: image.signature.subject
+      Hashes: image.hashes
+      Imphash: image.imphash
+    rule_conditions:
+      - type: logsource
+        category: image_load
+        product: windows
+
+  - id: fibratus_image_load_event
+    type: add_condition
+    conditions:
+      evt.name: LoadModule
+    rule_conditions:
+      - type: logsource
+        category: image_load
+        product: windows
+
+  # --- Registry add/set/delete ---
+  - id: fibratus_registry_event_fields
+    type: field_name_mapping
+    mapping:
+      TargetObject: registry.path
+      Details: registry.value
+      EventType: registry.operation
+      Image: ps.exe
+      ProcessId: ps.pid
+    rule_conditions:
+      - type: logsource
+        category: registry_event
+        product: windows
+
+  - id: fibratus_registry_set_fields
+    type: field_name_mapping
+    mapping:
+      TargetObject: registry.path
+      Details: registry.value
+      Image: ps.exe
+      ProcessId: ps.pid
+    rule_conditions:
+      - type: logsource
+        category: registry_set
+        product: windows
+
+  - id: fibratus_registry_set_event
+    type: add_condition
+    conditions:
+      evt.name: RegSetValue
+    rule_conditions:
+      - type: logsource
+        category: registry_set
+        product: windows
+
+  - id: fibratus_registry_add_fields
+    type: field_name_mapping
+    mapping:
+      TargetObject: registry.path
+      Image: ps.exe
+      ProcessId: ps.pid
+    rule_conditions:
+      - type: logsource
+        category: registry_add
+        product: windows
+
+  - id: fibratus_registry_add_event
+    type: add_condition
+    conditions:
+      evt.name: RegCreateKey
+    rule_conditions:
+      - type: logsource
+        category: registry_add
+        product: windows
+
+  - id: fibratus_registry_delete_fields
+    type: field_name_mapping
+    mapping:
+      TargetObject: registry.path
+      Image: ps.exe
+      ProcessId: ps.pid
+    rule_conditions:
+      - type: logsource
+        category: registry_delete
+        product: windows
+
+  - id: fibratus_registry_delete_event
+    type: add_condition
+    conditions:
+      evt.name: RegDeleteKey
+    rule_conditions:
+      - type: logsource
+        category: registry_delete
+        product: windows
+
+  # --- Pipe created ---
+  - id: fibratus_pipe_created_fields
+    type: field_name_mapping
+    mapping:
+      PipeName: file.name
+      Image: ps.exe
+      ProcessId: ps.pid
+    rule_conditions:
+      - type: logsource
+        category: pipe_created
+        product: windows
+
+  - id: fibratus_pipe_created_event
+    type: add_condition
+    conditions:
+      evt.name: CreateFile
+      file.type: Pipe
+    rule_conditions:
+      - type: logsource
+        category: pipe_created
+        product: windows
+
+  # --- Create remote thread ---
+  - id: fibratus_create_remote_thread_fields
+    type: field_name_mapping
+    mapping:
+      SourceImage: ps.exe
+      SourceProcessId: ps.pid
+      TargetImage: thread.image
+      TargetProcessId: thread.pid
+      StartAddress: thread.start_address
+      StartModule: thread.start_address.module
+      StartFunction: thread.start_address.symbol
+    rule_conditions:
+      - type: logsource
+        category: create_remote_thread
+        product: windows
+
+  - id: fibratus_create_remote_thread_event
+    type: add_condition
+    conditions:
+      evt.name: CreateThread
+    rule_conditions:
+      - type: logsource
+        category: create_remote_thread
+        product: windows
+
+  # --- Driver load ---
+  - id: fibratus_driver_load_fields
+    type: field_name_mapping
+    mapping:
+      ImageLoaded: image.path
+      Image: image.path
+      Signed: image.signature.exists
+      SignatureStatus: image.signature.status
+      Signature: image.signature.subject
+      Hashes: image.hashes
+    rule_conditions:
+      - type: logsource
+        category: driver_load
+        product: windows
+
+  - id: fibratus_driver_load_event
+    type: add_condition
+    conditions:
+      evt.name: LoadModule
+    rule_conditions:
+      - type: logsource
+        category: driver_load
+        product: windows
+
+  # --- Process access ---
+  - id: fibratus_process_access_fields
+    type: field_name_mapping
+    mapping:
+      SourceImage: ps.exe
+      SourceProcessId: ps.pid
+      TargetImage: ps.access.image
+      TargetProcessId: ps.access.pid
+      GrantedAccess: ps.access.mask
+    rule_conditions:
+      - type: logsource
+        category: process_access
+        product: windows
+
+  - id: fibratus_process_access_event
+    type: add_condition
+    conditions:
+      evt.name: OpenProcess
+    rule_conditions:
+      - type: logsource
+        category: process_access
+        product: windows
+
+  # --- Logsource finalizer: tag matched rules with service=fibratus ---
+  - id: fibratus_logsource_tag
+    type: change_logsource
+    product: windows
+    service: fibratus
+    rule_conditions:
+      - type: logsource
+        product: windows
