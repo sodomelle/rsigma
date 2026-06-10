@@ -119,26 +119,29 @@ fn render_envelope(
 
 /// Render the `condition:` block.
 ///
-/// - Single short single-line conditions use a plain flow scalar.
-/// - Author-provided multi-line conditions (the `sequence`/`maxspan` DSL
-///   the correlation builder emits) are wrapped in the folded `>`
-///   indicator with line breaks preserved verbatim.
+/// Every condition uses the folded `>` block scalar, matching the
+/// upstream Fibratus rules-library style (which writes `condition: >`
+/// consistently, even for one-line conditions). A folded scalar reflows
+/// single newlines into spaces, so the multi-line `sequence`/`maxspan`
+/// DSL the correlation builder emits stays a single valid filter
+/// expression after loading.
+///
+/// - Author-provided multi-line conditions keep their line breaks.
 /// - Long single-line conditions are soft-wrapped on top-level
-///   `and`/`or` boundaries, again under the folded indicator.
+///   `and`/`or` boundaries.
+/// - Short single-line conditions are emitted on one indented line.
 fn write_condition(out: &mut String, expr: &str) {
-    if expr.len() <= 100 && !expr.contains('\n') {
-        let _ = writeln!(out, "condition: {expr}");
-        return;
-    }
     out.push_str("condition: >\n");
     if expr.contains('\n') {
         for line in expr.lines() {
             let _ = writeln!(out, "  {line}");
         }
-    } else {
+    } else if expr.len() > 100 {
         for line in soft_wrap(expr, 100) {
             let _ = writeln!(out, "  {line}");
         }
+    } else {
+        let _ = writeln!(out, "  {expr}");
     }
 }
 
@@ -342,7 +345,8 @@ detection:
         let expected = "\
 name: Test Rule
 id: 12345678-1234-1234-1234-1234567890ab
-condition: ps.name = 'cmd.exe'
+condition: >
+  ps.name = 'cmd.exe'
 min-engine-version: 3.0.0
 ";
         assert_eq!(out, expected);
@@ -370,7 +374,7 @@ detection:
         assert!(out.contains("description: |\n  First line.\n  Second line.\n"));
         assert!(out.contains("tactic.id: TA0005"));
         assert!(out.contains("technique.id: T1055"));
-        assert!(out.contains("condition: ps.name = 'rundll32.exe'"));
+        assert!(out.contains("condition: >\n  ps.name = 'rundll32.exe'\n"));
         assert!(out.contains("min-engine-version: 3.0.0"));
     }
 

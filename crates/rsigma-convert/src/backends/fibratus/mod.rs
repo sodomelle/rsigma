@@ -11,13 +11,20 @@
 //! - **Case-insensitive matching needs an operator switch, not a wrapper.**
 //!   Fibratus's plain operators (`=`, `contains`, `startswith`,
 //!   `endswith`, `matches`, `in`, `intersects`) are case-sensitive; the
-//!   `i`-prefixed cousins (`icontains`, `istartswith`, ...) are
-//!   case-insensitive. The Sigma default is case-insensitive, so this
-//!   config populates the default `TextQueryConfig` operator slots with
-//!   the `i`-prefixed forms and the `case_sensitive_*_expression` slots
-//!   with the bare forms (exactly inverse to how other backends use those
-//!   slots) plus overrides `convert_condition_as_in_expression` to pick
-//!   `iin` vs `in` from per-item modifiers.
+//!   `i`-prefixed cousins (`icontains`, `istartswith`, ...) and the `~=`
+//!   case-insensitive string-equality operator are not. The Sigma
+//!   default is case-insensitive, so this config populates the default
+//!   `TextQueryConfig` operator slots with the case-insensitive forms
+//!   and the `case_sensitive_*_expression` slots with the bare forms
+//!   (exactly inverse to how other backends use those slots) plus
+//!   overrides `convert_condition_as_in_expression` to pick `iin` vs
+//!   `in` from per-item modifiers. Plain string equality without a glob
+//!   uses the dedicated string-equality operators (`~=` default, `=`
+//!   when `|cased`), which evaluate more efficiently than a wildcard
+//!   match; `imatches`/`matches` are reserved for values that actually
+//!   carry `*`/`?` wildcards. The `evt.name` event discriminator always
+//!   uses the exact `=` operator to match the upstream rules-library and
+//!   macro-library style.
 //! - **Regex is a function call, not an operator.** Sigma `|re` lowers
 //!   to the [`regex(field, 'pat1', 'pat2', ...) = true`](https://fibratus.io/docs/rules/functions)
 //!   filter function. Multi-value `|re` lists collapse into a single
@@ -136,9 +143,14 @@ pub static FIBRATUS_CONFIG: TextQueryConfig = TextQueryConfig {
     cidr_expression: None,
     not_cidr_expression: None,
 
-    field_null_expression: "{field} = null",
-    field_exists_expression: Some("{field} != null"),
-    field_not_exists_expression: Some("{field} = null"),
+    // Fibratus has no `null` token. A Sigma `field: null` (value is
+    // null/empty) lowers to an empty-string comparison; field presence
+    // (`|exists`) lowers to a `false` comparison (`!= false` present,
+    // `= false` absent), which is how Fibratus expresses set/unset for
+    // its zero-valued fields.
+    field_null_expression: "{field} = ''",
+    field_exists_expression: Some("{field} != false"),
+    field_not_exists_expression: Some("{field} = false"),
 
     compare_op_expression: Some("{field} {op} {value}"),
     compare_ops: &[("lt", "<"), ("lte", "<="), ("gt", ">"), ("gte", ">=")],
@@ -221,6 +233,74 @@ impl FibratusBackend {
         // helper itself rejects.
         let _ = values;
         false
+    }
+
+    /// Collapse a multi-value OR string list into one Fibratus
+    /// list-operator clause (`field iin ('a', 'b')`,
+    /// `field imatches ('a*', 'b?')`, `field icontains ('a', 'b')`, ...).
+    ///
+    /// Fibratus operators accept a parenthesized list on the right-hand
+    /// side with "any of" (OR) semantics, which is exactly what a
+    /// multi-value Sigma list means, so a single clause replaces the
+    /// OR-of-equalities the generic dispatch would otherwise emit.
+    ///
+    /// Returns `Ok(None)` (falling back to the generic dispatch) unless
+    /// the item is a plain multi-value string list carrying only
+    /// string-operator modifiers (`contains`, `startswith`, `endswith`,
+    /// `cased`). `|all` (AND, "all of") is left to the generic AND-join
+    /// because a list RHS cannot express conjunction. The `evt.name`
+    /// discriminator and `|cased` values use the case-sensitive `in`;
+    /// other equality lists use `iin`; wildcard-bearing lists use
+    /// `imatches`/`matches`.
+    fn try_string_value_list(&self, item: &DetectionItem) -> Result<Option<String>> {
+        if item.values.len() < 2 || item.field.has_modifier(Modifier::All) {
+            return Ok(None);
+        }
+        const ALLOWED: &[Modifier] = &[
+            Modifier::Contains,
+            Modifier::StartsWith,
+            Modifier::EndsWith,
+            Modifier::Cased,
+        ];
+        if item.field.modifiers.iter().any(|m| !ALLOWED.contains(m)) {
+            return Ok(None);
+        }
+        let mut strings: Vec<&SigmaString> = Vec::with_capacity(item.values.len());
+        for v in &item.values {
+            match v {
+                SigmaValue::String(s) => strings.push(s),
+                _ => return Ok(None),
+            }
+        }
+        let field_name = item
+            .field
+            .name
+            .as_deref()
+            .ok_or(ConvertError::MissingFieldName)?;
+        let f = self.escape_and_quote_field(field_name);
+        let cased = self.fibratus.case_sensitive || item.field.has_modifier(Modifier::Cased);
+        let any_wild = strings.iter().any(|s| shared::has_wildcards(s));
+
+        let op = if item.field.has_modifier(Modifier::Contains) {
+            if cased { "contains" } else { "icontains" }
+        } else if item.field.has_modifier(Modifier::StartsWith) {
+            if cased { "startswith" } else { "istartswith" }
+        } else if item.field.has_modifier(Modifier::EndsWith) {
+            if cased { "endswith" } else { "iendswith" }
+        } else if any_wild {
+            if cased { "matches" } else { "imatches" }
+        } else if cased || field_name == "evt.name" {
+            "in"
+        } else {
+            "iin"
+        };
+
+        let list = strings
+            .iter()
+            .map(|s| shared::quote_sigma_string(s))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(Some(format!("{f} {op} ({list})")))
     }
 }
 
@@ -366,6 +446,44 @@ impl Backend for FibratusBackend {
                 .collect();
             return Ok(format!("regex({f}, {}) = true", quoted.join(", ")));
         }
+
+        // Multi-value `|cidr` (without `|all`) collapses to a single
+        // `cidr_contains(field, 'a/n', 'b/m', ...)` call: the Fibratus
+        // filter function accepts a variadic list of CIDR masks and
+        // returns true if the address falls inside any of them, which is
+        // the OR semantics Sigma multi-value lists carry. With `|all`
+        // the generic AND-join is correct and we fall through.
+        if item.field.has_modifier(Modifier::Cidr)
+            && item.values.len() >= 2
+            && !item.field.has_modifier(Modifier::All)
+        {
+            let field_name = item
+                .field
+                .name
+                .as_deref()
+                .ok_or(ConvertError::MissingFieldName)?;
+            let mut masks: Vec<String> = Vec::with_capacity(item.values.len());
+            for v in &item.values {
+                match v {
+                    SigmaValue::String(s) => masks.push(shared::quote_plain_str(&s.original)),
+                    _ => {
+                        return Err(ConvertError::UnsupportedValue(
+                            "cidr requires string".into(),
+                        ));
+                    }
+                }
+            }
+            let f = self.escape_and_quote_field(field_name);
+            return Ok(format!("cidr_contains({f}, {})", masks.join(", ")));
+        }
+
+        // Multi-value OR string lists collapse to a single Fibratus
+        // list-operator clause (`field iin ('a', 'b')`, ...) instead of
+        // OR'd single comparisons.
+        if let Some(list_expr) = self.try_string_value_list(item)? {
+            return Ok(list_expr);
+        }
+
         default_convert_detection_item(self, item, state)
     }
 
@@ -406,38 +524,63 @@ impl Backend for FibratusBackend {
         let is_startswith = mods.contains(&Modifier::StartsWith);
         let is_endswith = mods.contains(&Modifier::EndsWith);
 
-        // Modifier dispatch in the same order the generic helper uses.
-        //
-        // String equality routes through `matches`/`imatches` rather than
-        // the bare `=` operator because Sigma string comparisons are
-        // case-insensitive by default. Fibratus's `=` is case-sensitive
-        // (only `i`-prefixed operators are not), so a Sigma rule like
-        // `Image: cmd.exe` must lower to `ps.exe imatches 'cmd.exe'`
-        // (matches `cmd.exe` and `CMD.EXE`) and `Image|cased: cmd.exe`
-        // to `ps.exe matches 'cmd.exe'` (case-sensitive). `matches`
-        // without wildcards is a literal-equality glob, so the semantics
-        // are exact equality with the correct case-handling.
-        //
-        // The bare `=` operator is reserved for numeric/boolean/null
-        // values where case-insensitivity is not meaningful; those go
-        // through `convert_field_eq_num`/`_bool`/`_null` directly.
-        let template = match (is_cased, is_contains, is_startswith, is_endswith) {
-            (true, true, _, _) => self.config.case_sensitive_contains_expression,
-            (true, _, true, _) => self.config.case_sensitive_startswith_expression,
-            (true, _, _, true) => self.config.case_sensitive_endswith_expression,
-            (true, _, _, _) => self.config.case_sensitive_match_expression,
-            (false, true, _, _) => self.config.contains_expression,
-            (false, _, true, _) => self.config.startswith_expression,
-            (false, _, _, true) => self.config.endswith_expression,
-            (false, false, false, false) => self.config.wildcard_match_expression,
-        };
+        // Substring operators (`contains`/`startswith`/`endswith`) always
+        // use the dedicated Fibratus operators, case-insensitive by
+        // default (`icontains`, ...) and bare with `|cased` (`contains`,
+        // ...), matching the Sigma default.
+        if is_contains || is_startswith || is_endswith {
+            let template = match (is_cased, is_contains, is_startswith, is_endswith) {
+                (true, true, _, _) => self.config.case_sensitive_contains_expression,
+                (true, _, true, _) => self.config.case_sensitive_startswith_expression,
+                (true, _, _, true) => self.config.case_sensitive_endswith_expression,
+                (false, true, _, _) => self.config.contains_expression,
+                (false, _, true, _) => self.config.startswith_expression,
+                (false, _, _, true) => self.config.endswith_expression,
+                _ => unreachable!("substring branch guarded above"),
+            };
+            let expr = template.ok_or_else(|| {
+                ConvertError::UnsupportedModifier(format!("string operator for {field}"))
+            })?;
+            return Ok(ConvertResult::Query(
+                expr.replace("{field}", &f).replace("{value}", &val),
+            ));
+        }
 
-        let expr = template.ok_or_else(|| {
-            ConvertError::UnsupportedModifier(format!("string operator for {field}"))
-        })?;
-        Ok(ConvertResult::Query(
-            expr.replace("{field}", &f).replace("{value}", &val),
-        ))
+        // Plain equality. Sigma string comparisons are case-insensitive by
+        // default; Fibratus's bare `=` is case-sensitive. The operator
+        // therefore depends on whether the value carries glob wildcards
+        // and on the `|cased` modifier:
+        //
+        // - With wildcards: `imatches` (default) / `matches` (`|cased`),
+        //   the glob-matching operators.
+        // - Without wildcards: `~=` (default, case-insensitive string
+        //   equality) / `=` (`|cased`, exact). These are cheaper than a
+        //   wildcard match and read the way the upstream rules library
+        //   writes literal equality.
+        //
+        // `evt.name` is the canonical event discriminator and always uses
+        // the exact `=` operator (the event-name vocabulary is a fixed,
+        // canonically-cased enum and every upstream macro/rule writes
+        // `evt.name = '...'`).
+        let expr = if shared::has_wildcards(value) {
+            let template = if is_cased {
+                self.config.case_sensitive_match_expression
+            } else {
+                self.config.wildcard_match_expression
+            };
+            let template = template.ok_or_else(|| {
+                ConvertError::UnsupportedModifier(format!("string operator for {field}"))
+            })?;
+            template.replace("{field}", &f).replace("{value}", &val)
+        } else {
+            let op = if is_cased || field == "evt.name" {
+                "="
+            } else {
+                "~="
+            };
+            format!("{f} {op} {val}")
+        };
+        Ok(ConvertResult::Query(expr))
     }
 
     fn convert_field_eq_str_case_sensitive(

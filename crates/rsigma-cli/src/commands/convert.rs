@@ -225,7 +225,7 @@ pub(crate) fn cmd_list_targets() {
     println!("Available conversion targets:");
     println!("  postgres  - PostgreSQL/TimescaleDB (aliases: postgresql, pg)");
     println!("  lynxdb    - LynxDB log analytics engine");
-    println!("  fibratus  - Fibratus Windows kernel-event detection engine");
+    println!("  fibratus  - Fibratus kernel-event detection engine");
     println!("  test      - Backend-neutral test backend");
 }
 

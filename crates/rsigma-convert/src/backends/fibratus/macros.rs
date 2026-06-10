@@ -8,12 +8,13 @@
 //! sequence with the macro name, so the rendered output reads like
 //! the upstream [Fibratus rules library](https://github.com/rabbitstack/fibratus/tree/master/rules)
 //! (`spawn_process and ps.exe iendswith '\\cmd.exe'` rather than
-//! `evt.name imatches 'CreateProcess' and ps.exe iendswith '\\cmd.exe'`).
+//! `evt.name = 'CreateProcess' and ps.exe iendswith '\\cmd.exe'`).
 //!
-//! Both operator forms are accepted at recognition time so that
-//! `-O case_sensitive=true` (which emits `evt.name = 'CreateProcess'`)
-//! still matches the same macros as the default
-//! (`evt.name imatches 'CreateProcess'`).
+//! Both operator forms are accepted per clause at recognition time so a
+//! macro matches whether a clause was emitted with the case-sensitive
+//! string-equality operator (`field = 'literal'`, what `evt.name` and
+//! `-O case_sensitive=true` produce) or the case-insensitive one
+//! (`field ~= 'literal'`, the default for non-`evt.name` literals).
 
 use std::sync::LazyLock;
 
@@ -54,6 +55,10 @@ pub const EXPRESSION_MACROS: &[(&str, &str)] = &[
         "evt.name = 'CreateFile' and file.operation = 'OPEN' and file.status = 'Success'",
     ),
     (
+        "create_file",
+        "evt.name = 'CreateFile' and file.operation != 'OPEN' and file.status = 'Success'",
+    ),
+    (
         "create_new_file",
         "evt.name = 'CreateFile' and file.operation = 'CREATE' and file.status = 'Success'",
     ),
@@ -87,9 +92,12 @@ pub const EXPRESSION_MACROS: &[(&str, &str)] = &[
 ///
 /// Stored as `(macro_name, default_form_clauses, cased_form_clauses)`:
 /// `default_form_clauses` is what the backend emits with the default
-/// case-insensitive operators (`evt.name imatches 'CreateProcess'`);
-/// `cased_form_clauses` is what the backend emits with
-/// `-O case_sensitive=true` (`evt.name = 'CreateProcess'`).
+/// case-insensitive string equality (`field ~= 'literal'`);
+/// `cased_form_clauses` is what the backend emits for exact equality
+/// (`field = 'literal'`, used for `evt.name` and `-O case_sensitive=true`).
+/// Each clause is matched independently against either form, so a macro
+/// whose `evt.name` clause renders with `=` while a sibling status clause
+/// renders with `~=` still matches.
 type MacroClauses = (&'static str, Vec<String>, Vec<String>);
 
 /// Pre-rendered macro clauses, derived from [`EXPRESSION_MACROS`] at
@@ -102,7 +110,7 @@ static MACRO_CLAUSES: LazyLock<Vec<MacroClauses>> = LazyLock::new(|| {
         .iter()
         .map(|(name, src)| {
             let cased: Vec<String> = split_clauses(src).into_iter().map(str::to_string).collect();
-            let default: Vec<String> = cased.iter().map(|c| to_imatches(c)).collect();
+            let default: Vec<String> = cased.iter().map(|c| to_ci_eq(c)).collect();
             (*name, default, cased)
         })
         .collect()
@@ -159,7 +167,7 @@ pub fn recognize(condition: &str) -> String {
                 continue;
             }
             let slice = &clauses[i..i + len];
-            if clauses_equal(slice, default_clauses) || clauses_equal(slice, cased_clauses) {
+            if clauses_match(slice, default_clauses, cased_clauses) {
                 matched = Some((*name, len));
                 break;
             }
@@ -183,11 +191,23 @@ fn matches_any_macro(clause: &str) -> bool {
     let slice = std::slice::from_ref(&binding);
     MACRO_CLAUSES
         .iter()
-        .any(|(_, def, cased)| clauses_equal(slice, def) || clauses_equal(slice, cased))
+        .any(|(_, def, cased)| clauses_match(slice, def, cased))
 }
 
-fn clauses_equal(left: &[String], right: &[String]) -> bool {
-    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| a.trim() == b.trim())
+/// Whether `slice` matches a macro's clause sequence, comparing each
+/// clause against either the default (`~=`) or cased (`=`) form
+/// independently. Per-clause matching means a macro whose `evt.name`
+/// clause renders with `=` and a status clause renders with `~=` still
+/// matches without needing a uniform operator across the whole run.
+fn clauses_match(slice: &[String], default: &[String], cased: &[String]) -> bool {
+    if slice.len() != default.len() || slice.len() != cased.len() {
+        return false;
+    }
+    slice
+        .iter()
+        .zip(default)
+        .zip(cased)
+        .all(|((got, d), c)| got.trim() == d.trim() || got.trim() == c.trim())
 }
 
 // =============================================================================
@@ -296,14 +316,16 @@ fn split_clauses(src: &str) -> Vec<&str> {
 }
 
 /// Convert a cased-form clause (`field = 'literal'`) into the
-/// default-form output (`field imatches 'literal'`) so the recognizer
-/// matches both styles.
+/// default-form output (`field ~= 'literal'`) so the recognizer matches
+/// both styles. `~=` is Fibratus's case-insensitive string-equality
+/// operator and is what the backend emits for a non-`evt.name` literal
+/// without `|cased`.
 ///
 /// Only the ` = '<literal>'` shape is transformed; numeric, boolean,
-/// regex, function-call, and field-to-field equalities are passed
-/// through unchanged (Sigma's case modifier does not apply to them
-/// in the backend's rendering either).
-fn to_imatches(clause: &str) -> String {
+/// `!=`, regex, function-call, list (`in (...)`), and field-to-field
+/// equalities are passed through unchanged (the backend renders them
+/// identically regardless of case).
+fn to_ci_eq(clause: &str) -> String {
     // Find a top-level ` = '` boundary; if none, return verbatim.
     let bytes = clause.as_bytes();
     let mut depth = 0i32;
@@ -331,7 +353,7 @@ fn to_imatches(clause: &str) -> String {
         if depth == 0 && matches_token(bytes, i, b" = '") {
             let mut out = String::with_capacity(clause.len() + 6);
             out.push_str(&clause[..i]);
-            out.push_str(" imatches '");
+            out.push_str(" ~= '");
             out.push_str(&clause[i + b" = '".len()..]);
             return out;
         }
@@ -353,6 +375,9 @@ mod tests {
         assert!(is_known_macro("spawn_process"));
         assert!(is_known_macro("create_thread"));
         assert!(is_known_macro("open_file"));
+        // `create_file` (any creation disposition != OPEN) is the
+        // canonical upstream file-creation macro.
+        assert!(is_known_macro("create_file"));
         // Composite macros upstream defines on top of other macros
         // (`modify_registry`, `inbound_network`, `outbound_network`,
         // `load_driver`, ...) are deliberately absent from the
@@ -367,13 +392,17 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn recognize_spawn_process_default_form() {
-        let out = recognize("evt.name imatches 'CreateProcess'");
+    fn recognize_spawn_process_case_insensitive_form() {
+        // A non-`evt.name` literal would render `~=`; the recognizer
+        // accepts that case-insensitive form for any clause.
+        let out = recognize("evt.name ~= 'CreateProcess'");
         assert_eq!(out, "spawn_process");
     }
 
     #[test]
     fn recognize_spawn_process_cased_form() {
+        // The backend renders `evt.name` with the exact `=` operator;
+        // this is the form a real conversion emits.
         let out = recognize("evt.name = 'CreateProcess'");
         assert_eq!(out, "spawn_process");
     }
@@ -381,7 +410,7 @@ mod tests {
     #[test]
     fn recognize_spawn_process_with_extra_clauses() {
         let out = recognize(
-            "evt.name imatches 'CreateProcess' and ps.exe iendswith '\\cmd.exe' and ps.cmdline icontains 'whoami'",
+            "evt.name = 'CreateProcess' and ps.exe iendswith '\\cmd.exe' and ps.cmdline icontains 'whoami'",
         );
         assert_eq!(
             out,
@@ -391,9 +420,9 @@ mod tests {
 
     #[test]
     fn recognize_write_file_and_read_file() {
-        let out = recognize("evt.name imatches 'WriteFile' and file.path iendswith '\\out.log'");
+        let out = recognize("evt.name = 'WriteFile' and file.path iendswith '\\out.log'");
         assert_eq!(out, "write_file and file.path iendswith '\\out.log'");
-        let out2 = recognize("evt.name imatches 'ReadFile'");
+        let out2 = recognize("evt.name = 'ReadFile'");
         assert_eq!(out2, "read_file");
     }
 
@@ -403,8 +432,11 @@ mod tests {
 
     #[test]
     fn recognize_open_file_three_clauses() {
+        // `evt.name` renders with `=`; the file.operation/file.status
+        // literals render with the case-insensitive `~=`. The per-clause
+        // matcher accepts the mix.
         let out = recognize(
-            "evt.name imatches 'CreateFile' and file.operation imatches 'OPEN' and file.status imatches 'Success'",
+            "evt.name = 'CreateFile' and file.operation ~= 'OPEN' and file.status ~= 'Success'",
         );
         assert_eq!(out, "open_file");
     }
@@ -412,7 +444,7 @@ mod tests {
     #[test]
     fn recognize_open_file_keeps_trailing_clauses() {
         let out = recognize(
-            "evt.name imatches 'CreateFile' and file.operation imatches 'OPEN' and file.status imatches 'Success' and file.path iendswith '\\secret.txt'",
+            "evt.name = 'CreateFile' and file.operation ~= 'OPEN' and file.status ~= 'Success' and file.path iendswith '\\secret.txt'",
         );
         assert_eq!(out, "open_file and file.path iendswith '\\secret.txt'");
     }
@@ -420,9 +452,26 @@ mod tests {
     #[test]
     fn recognize_set_value_two_clauses() {
         let out = recognize(
-            "evt.name imatches 'RegSetValue' and registry.status imatches 'Success' and registry.path icontains '\\Run\\'",
+            "evt.name = 'RegSetValue' and registry.status ~= 'Success' and registry.path icontains '\\Run\\'",
         );
         assert_eq!(out, "set_value and registry.path icontains '\\Run\\'",);
+    }
+
+    #[test]
+    fn recognize_create_file_matches_inequality_disposition() {
+        // The `create_file` macro keeps its `file.operation != 'OPEN'`
+        // clause verbatim in both forms (`!=` is not transformed), and
+        // its `=`-equality clauses match either operator form.
+        let out = recognize(
+            "evt.name = 'CreateFile' and file.operation != 'OPEN' and file.status ~= 'Success'",
+        );
+        assert_eq!(out, "create_file");
+        // The OPEN disposition is the distinct `open_file` macro, not
+        // `create_file`.
+        let out2 = recognize(
+            "evt.name = 'CreateFile' and file.operation ~= 'OPEN' and file.status ~= 'Success'",
+        );
+        assert_eq!(out2, "open_file");
     }
 
     #[test]
@@ -438,11 +487,11 @@ mod tests {
 
     #[test]
     fn recognize_does_not_match_with_different_value() {
-        // `evt.name imatches 'CreateThread'` is a macro
-        // (`create_thread`); `'CreateProcess'` is a different macro
-        // (`spawn_process`). Neither should match the other.
-        let out = recognize("evt.name imatches 'TerminateProcess'");
-        assert_eq!(out, "evt.name imatches 'TerminateProcess'");
+        // `evt.name = 'CreateThread'` is a macro (`create_thread`);
+        // `'CreateProcess'` is a different macro (`spawn_process`).
+        // `'TerminateProcess'` is neither, so it passes through.
+        let out = recognize("evt.name = 'TerminateProcess'");
+        assert_eq!(out, "evt.name = 'TerminateProcess'");
     }
 
     #[test]
@@ -458,29 +507,28 @@ mod tests {
         // The OR group is one top-level clause; the inner contents
         // are parenthesized, so the splitter does not see them as
         // separate `and`s. `spawn_process` is therefore not inside.
-        let out = recognize(
-            "(evt.name imatches 'CreateProcess' or evt.name imatches 'CreateThread') and ps.pid = 4",
-        );
+        let out =
+            recognize("(evt.name = 'CreateProcess' or evt.name = 'CreateThread') and ps.pid = 4");
         assert_eq!(
             out,
-            "(evt.name imatches 'CreateProcess' or evt.name imatches 'CreateThread') and ps.pid = 4",
+            "(evt.name = 'CreateProcess' or evt.name = 'CreateThread') and ps.pid = 4",
         );
     }
 
     #[test]
     fn recognize_picks_longest_match() {
-        // Both `evt.name imatches 'CreateFile'` (no macro alone, but a
-        // prefix of three) and the full `open_file` triple are
-        // available; the greedy longest-match must produce
-        // `open_file`, not three bare clauses.
+        // Both `evt.name = 'CreateFile'` (no macro alone, but a prefix
+        // of three) and the full `open_file` triple are available; the
+        // greedy longest-match must produce `open_file`, not three bare
+        // clauses.
         let out = recognize(
-            "evt.name imatches 'CreateFile' and file.operation imatches 'OPEN' and file.status imatches 'Success'",
+            "evt.name = 'CreateFile' and file.operation ~= 'OPEN' and file.status ~= 'Success'",
         );
         assert_eq!(out, "open_file");
         // Without the trailing two clauses the bare `evt.name = '...'`
         // is not itself a macro, so the input passes through.
-        let out2 = recognize("evt.name imatches 'CreateFile'");
-        assert_eq!(out2, "evt.name imatches 'CreateFile'");
+        let out2 = recognize("evt.name = 'CreateFile'");
+        assert_eq!(out2, "evt.name = 'CreateFile'");
     }
 
     #[test]
@@ -511,18 +559,22 @@ mod tests {
     }
 
     #[test]
-    fn to_imatches_substitutes_first_top_level_equality() {
+    fn to_ci_eq_substitutes_first_top_level_equality() {
         assert_eq!(
-            to_imatches("evt.name = 'CreateProcess'"),
-            "evt.name imatches 'CreateProcess'",
+            to_ci_eq("evt.name = 'CreateProcess'"),
+            "evt.name ~= 'CreateProcess'",
         );
     }
 
     #[test]
-    fn to_imatches_leaves_numeric_equality_alone() {
-        // `evt.pid != 4` uses `!=`, not ` = '`, so to_imatches passes
-        // it through unchanged. The recognizer compares numeric
-        // clauses byte-for-byte regardless of `case_sensitive`.
-        assert_eq!(to_imatches("evt.pid != 4"), "evt.pid != 4");
+    fn to_ci_eq_leaves_inequality_alone() {
+        // `evt.pid != 4` uses `!=`, not ` = '`, so to_ci_eq passes it
+        // through unchanged. `file.operation != 'OPEN'` (the create_file
+        // middle clause) is likewise untouched.
+        assert_eq!(to_ci_eq("evt.pid != 4"), "evt.pid != 4");
+        assert_eq!(
+            to_ci_eq("file.operation != 'OPEN'"),
+            "file.operation != 'OPEN'",
+        );
     }
 }

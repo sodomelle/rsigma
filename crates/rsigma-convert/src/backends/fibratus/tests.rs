@@ -44,10 +44,10 @@ fn convert_with(yaml: &str, backend: &FibratusBackend, format: &str) -> Vec<Stri
 #[test]
 fn field_eq_string_default_case_insensitive() {
     // Sigma defaults to case-insensitive string matching, and Fibratus's
-    // bare `=` is case-sensitive. Plain equality therefore routes
-    // through `imatches`, which is a literal-equality glob without
-    // wildcards and preserves Sigma's case-insensitive semantics
-    // (matches `cmd.exe` and `CMD.EXE`).
+    // bare `=` is case-sensitive. A literal without wildcards therefore
+    // uses `~=`, Fibratus's case-insensitive string-equality operator
+    // (matches `cmd.exe` and `CMD.EXE`), which is cheaper than a glob
+    // match.
     let q = convert(
         r#"
 title: T
@@ -57,13 +57,13 @@ detection:
   condition: s
 "#,
     );
-    assert_eq!(q, vec!["ps.name imatches 'cmd.exe'"]);
+    assert_eq!(q, vec!["ps.name ~= 'cmd.exe'"]);
 }
 
 #[test]
-fn field_eq_string_cased_modifier_uses_matches() {
-    // The `|cased` modifier flips to the case-sensitive `matches`
-    // operator (still a literal-equality glob, just case-sensitive).
+fn field_eq_string_cased_modifier_uses_exact_equality() {
+    // The `|cased` modifier flips to the case-sensitive exact-equality
+    // operator `=` (no wildcards in the value).
     let q = convert(
         r#"
 title: T
@@ -73,7 +73,7 @@ detection:
   condition: s
 "#,
     );
-    assert_eq!(q, vec!["ps.name matches 'Cmd.exe'"]);
+    assert_eq!(q, vec!["ps.name = 'Cmd.exe'"]);
 }
 
 #[test]
@@ -197,7 +197,7 @@ detection:
     );
     assert_eq!(
         q,
-        vec!["ps.name imatches 'cmd.exe' and ps.parent.name imatches 'explorer.exe'"]
+        vec!["ps.name ~= 'cmd.exe' and ps.parent.name ~= 'explorer.exe'"]
     );
 }
 
@@ -217,10 +217,7 @@ detection:
     // Multi-child OR groups are always parenthesized so the standard
     // Sigma precedence (AND binds tighter than OR) survives any
     // surrounding AND context. Harmless at top level.
-    assert_eq!(
-        q,
-        vec!["(ps.name imatches 'cmd.exe' or ps.name imatches 'pwsh.exe')"]
-    );
+    assert_eq!(q, vec!["(ps.name ~= 'cmd.exe' or ps.name ~= 'pwsh.exe')"]);
 }
 
 #[test]
@@ -238,7 +235,7 @@ detection:
     );
     assert_eq!(
         q,
-        vec!["ps.name imatches 'cmd.exe' and not (ps.parent.name imatches 'explorer.exe')"]
+        vec!["ps.name ~= 'cmd.exe' and not (ps.parent.name ~= 'explorer.exe')"]
     );
 }
 
@@ -260,7 +257,7 @@ detection:
     assert_eq!(
         q,
         vec![
-            "ps.name imatches 'cmd.exe' and (ps.parent.name imatches 'explorer.exe' or ps.parent.name imatches 'services.exe')"
+            "ps.name ~= 'cmd.exe' and (ps.parent.name ~= 'explorer.exe' or ps.parent.name ~= 'services.exe')"
         ]
     );
 }
@@ -270,14 +267,10 @@ detection:
 // ---------------------------------------------------------------------
 
 #[test]
-fn multi_value_string_eq_renders_as_or_list() {
-    // The IN-list optimization (`field iin ('a', 'b')`) is opt-in:
-    // `convert_condition_as_in_expression` exists on the trait but is
-    // not auto-invoked by the default detection-item dispatch, so
-    // multi-value Sigma values currently lower to OR'd equality across
-    // every text backend (same behavior as LynxDB/Postgres). When/if
-    // the dispatch layer learns to auto-collapse, this test flips to
-    // assert `ps.name iin ('cmd.exe', 'pwsh.exe')`.
+fn multi_value_string_eq_collapses_to_iin() {
+    // A multi-value OR list of plain literals collapses to a single
+    // `iin (...)` clause (case-insensitive IN), the idiomatic Fibratus
+    // form, rather than OR'd `~=` comparisons.
     let q = convert(
         r#"
 title: T
@@ -289,10 +282,41 @@ detection:
   condition: s
 "#,
     );
-    assert_eq!(
-        q,
-        vec!["(ps.name imatches 'cmd.exe' or ps.name imatches 'pwsh.exe')"]
+    assert_eq!(q, vec!["ps.name iin ('cmd.exe', 'pwsh.exe')"]);
+}
+
+#[test]
+fn multi_value_string_eq_with_wildcards_uses_imatches_list() {
+    // When any value carries a glob, the list uses `imatches (...)`
+    // so the wildcards are honored.
+    let q = convert(
+        r#"
+title: T
+detection:
+  s:
+    ps.name:
+      - '*cmd*'
+      - 'power?hell'
+  condition: s
+"#,
     );
+    assert_eq!(q, vec!["ps.name imatches ('*cmd*', 'power?hell')"]);
+}
+
+#[test]
+fn multi_value_contains_collapses_to_icontains_list() {
+    let q = convert(
+        r#"
+title: T
+detection:
+  s:
+    ps.cmdline|contains:
+      - whoami
+      - localgroup
+  condition: s
+"#,
+    );
+    assert_eq!(q, vec!["ps.cmdline icontains ('whoami', 'localgroup')"]);
 }
 
 #[test]
@@ -364,7 +388,9 @@ detection:
 }
 
 #[test]
-fn field_eq_null() {
+fn field_eq_null_compares_to_empty_string() {
+    // Fibratus has no `null` token; a Sigma `field: null` lowers to an
+    // empty-string comparison.
     let q = convert(
         r#"
 title: T
@@ -374,7 +400,7 @@ detection:
   condition: s
 "#,
     );
-    assert_eq!(q, vec!["ps.username = null"]);
+    assert_eq!(q, vec!["ps.username = ''"]);
 }
 
 // ---------------------------------------------------------------------
@@ -450,7 +476,7 @@ detection:
     );
     assert_eq!(
         q,
-        vec!["ps.name imatches 'cmd.exe' and not (regex(ps.cmdline, '^safe') = true)"]
+        vec!["ps.name ~= 'cmd.exe' and not (regex(ps.cmdline, '^safe') = true)"]
     );
 }
 
@@ -474,7 +500,7 @@ detection:
     );
     assert_eq!(
         q,
-        vec!["ps.name imatches 'a.exe' and (ps.name imatches 'b.exe' or ps.name imatches 'c.exe')"]
+        vec!["ps.name ~= 'a.exe' and (ps.name ~= 'b.exe' or ps.name ~= 'c.exe')"]
     );
 }
 
@@ -544,7 +570,10 @@ detection:
 }
 
 #[test]
-fn multi_value_cidr_or_joins_each_block() {
+fn multi_value_cidr_collapses_to_single_call() {
+    // `cidr_contains()` accepts a variadic list of CIDR masks and
+    // returns true if the address is in any of them, so a multi-value
+    // `|cidr` (OR) collapses to one call.
     let q = convert(
         r#"
 title: T
@@ -559,9 +588,7 @@ detection:
     );
     assert_eq!(
         q,
-        vec![
-            "(cidr_contains(net.dip, '10.0.0.0/8') or cidr_contains(net.dip, '172.16.0.0/12') or cidr_contains(net.dip, '192.168.0.0/16'))"
-        ],
+        vec!["cidr_contains(net.dip, '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')"],
     );
 }
 
@@ -589,6 +616,8 @@ detection:
 
 #[test]
 fn field_exists_true() {
+    // Fibratus has no `null`; field presence is expressed against the
+    // zero value (`!= false` set, `= false` absent).
     let q = convert(
         r#"
 title: T
@@ -598,7 +627,7 @@ detection:
   condition: s
 "#,
     );
-    assert_eq!(q, vec!["thread.callstack.is_unbacked != null"]);
+    assert_eq!(q, vec!["thread.callstack.is_unbacked != false"]);
 }
 
 #[test]
@@ -612,7 +641,7 @@ detection:
   condition: s
 "#,
     );
-    assert_eq!(q, vec!["thread.callstack.is_unbacked = null"]);
+    assert_eq!(q, vec!["thread.callstack.is_unbacked = false"]);
 }
 
 #[test]
@@ -683,9 +712,9 @@ detection:
     assert!(doc.contains("id: 11111111-2222-3333-4444-555555555555\n"));
     assert!(doc.contains("description: |\n  Detect cmd.exe spawned by explorer.\n"));
     assert!(doc.contains("tactic.id: TA0002\n"));
-    assert!(doc.contains(
-        "condition: ps.name imatches 'cmd.exe' and ps.parent.name imatches 'explorer.exe'\n"
-    ));
+    assert!(
+        doc.contains("condition: >\n  ps.name ~= 'cmd.exe' and ps.parent.name ~= 'explorer.exe'\n")
+    );
     assert!(doc.contains("min-engine-version: 3.0.0\n"));
 }
 
@@ -793,25 +822,18 @@ detection:
     assert_eq!(q.len(), 1);
     let out = &q[0];
     assert!(out.contains("spawn_process"), "got: {out}");
-    // On a Fibratus `CreateProcess` event the spawned process lives
-    // under `ps.sibling.*` (Sigma `Image` -> `ps.sibling.exe`,
-    // Sigma `CommandLine` -> `ps.sibling.cmdline`) and the parent
-    // (event generator) is `ps.exe`. The Sigma source `'\cmd.exe'`
-    // parses as the literal `\cmd.exe`; Fibratus single-quoted
-    // strings need `\\` for a literal `\`, so the rendered value
-    // carries the double-escape.
+    // On a Fibratus 3.0.0 `CreateProcess` event `ps.*` is the created
+    // (child) process (Sigma `Image` -> `ps.exe`, Sigma `CommandLine`
+    // -> `ps.cmdline`) and the spawning process is `ps.parent.*`. The
+    // Sigma source `'\cmd.exe'` parses as the literal `\cmd.exe`;
+    // Fibratus single-quoted strings need `\\` for a literal `\`, so
+    // the rendered value carries the double-escape.
+    assert!(out.contains(r"ps.exe iendswith '\\cmd.exe'"), "got: {out}",);
     assert!(
-        out.contains(r"ps.sibling.exe iendswith '\\cmd.exe'"),
-        "got: {out}",
-    );
-    assert!(
-        out.contains(r"ps.exe iendswith '\\explorer.exe'"),
+        out.contains(r"ps.parent.exe iendswith '\\explorer.exe'"),
         "got: {out}"
     );
-    assert!(
-        out.contains("ps.sibling.cmdline icontains 'whoami'"),
-        "got: {out}",
-    );
+    assert!(out.contains("ps.cmdline icontains 'whoami'"), "got: {out}",);
 }
 
 #[test]
@@ -869,11 +891,9 @@ detection:
     let out = &q[0];
     // `evt.name: RegSetValue` is the single-clause `set_value` macro
     // body but the registry status guard is not added by the
-    // pipeline, so the standalone clause stays as the raw form.
-    assert!(
-        out.contains("evt.name imatches 'RegSetValue'"),
-        "got: {out}"
-    );
+    // pipeline, so the standalone clause stays as the raw form. The
+    // `evt.name` discriminator uses the exact `=` operator.
+    assert!(out.contains("evt.name = 'RegSetValue'"), "got: {out}");
     assert!(
         out.contains(r"registry.path icontains '\\CurrentVersion\\Run\\'"),
         "got: {out}",
@@ -887,7 +907,7 @@ detection:
 #[test]
 fn macros_recognize_spawn_process_via_pipeline() {
     // The fibratus_windows pipeline injects `evt.name: CreateProcess`;
-    // the backend then renders it as `evt.name imatches 'CreateProcess'`,
+    // the backend then renders it as `evt.name = 'CreateProcess'`,
     // which the macro recognizer must rewrite to `spawn_process`.
     use rsigma_eval::pipeline::{apply_pipelines_with_state, builtin::resolve_builtin};
 
@@ -915,7 +935,7 @@ detection:
         "expected spawn_process, got: {out}"
     );
     assert!(
-        !out.contains("evt.name imatches 'CreateProcess'"),
+        !out.contains("evt.name = 'CreateProcess'"),
         "macro should have replaced the raw clause, got: {out}",
     );
 }
@@ -944,7 +964,7 @@ detection:
     let state = apply_pipelines_with_state(&[pipeline], rule).unwrap();
     let q = backend.convert_rule(rule, "expr", &state).unwrap();
     assert!(
-        q[0].contains("evt.name imatches 'CreateProcess'"),
+        q[0].contains("evt.name = 'CreateProcess'"),
         "expected raw evt.name clause with use_macros=false, got: {}",
         q[0],
     );

@@ -9,6 +9,13 @@
 # vocabulary (`ps.exe`, `ps.cmdline`, `file.path`, `registry.path`,
 # `net.dip`, ...).
 #
+# Field namespace note: Fibratus 3.0.0 decommissioned the legacy
+# `ps.sibling.*` namespace and unified process attributes under `ps.*`.
+# On a `CreateProcess` event `ps.exe` is the full executable path of the
+# *created* (child) process and the spawning process is addressed via
+# `ps.parent.*`. Cross-process targets on `OpenProcess`/`OpenThread`
+# events are exposed as event arguments (`evt.arg[exe]`, `evt.arg[pid]`).
+#
 # Use this pipeline when converting Sigma Windows rules to Fibratus rule
 # YAML so the output matches the upstream rules-library style and the
 # Fibratus loader accepts the conditions without manual editing.
@@ -22,23 +29,21 @@ priority: 20
 transformations:
   # --- Process creation ---
   #
-  # On a Fibratus `CreateProcess` event the *generating* process is
-  # the parent that called the syscall; the new/child process lives
-  # under the `ps.sibling.*` namespace. That inverts the Sigma
-  # mapping every other category uses: Sigma `process_creation.Image`
-  # is the *spawned* (child) process, not the parent that spawned
-  # it.
+  # On a Fibratus 3.0.0 `CreateProcess` event `ps.*` describes the
+  # *created* (child) process, matching Sigma's `process_creation.Image`
+  # (the spawned process). The spawning process is addressed via the
+  # `ps.parent.*` namespace.
   - id: fibratus_process_creation_fields
     type: field_name_mapping
     mapping:
-      Image: ps.sibling.exe
-      CommandLine: ps.sibling.cmdline
-      ProcessId: ps.sibling.pid
-      User: ps.sibling.username
-      LogonId: ps.sibling.sessionid
-      ParentImage: ps.exe
-      ParentCommandLine: ps.cmdline
-      ParentProcessId: ps.pid
+      Image: ps.exe
+      CommandLine: ps.cmdline
+      ProcessId: ps.pid
+      User: ps.username
+      LogonId: ps.sessionid
+      ParentImage: ps.parent.exe
+      ParentCommandLine: ps.parent.cmdline
+      ParentProcessId: ps.parent.pid
     rule_conditions:
       - type: logsource
         category: process_creation
@@ -349,21 +354,21 @@ transformations:
 
   # --- Process access ---
   #
-  # On an `OpenProcess` event the *generator* is the caller and the
-  # target process being opened lives under the `ps.sibling.*`
-  # namespace (the upstream `open_process` macro pairs with
-  # `ps.sibling.name ~= 'lsass.exe'` in the documented LSASS-dump
-  # rule). `GrantedAccess` maps to `ps.access.mask.names`, the
-  # human-readable slice of access-right names that Sigma rules
-  # typically test against (`ps.access.mask` exposes the raw mask
-  # value if needed).
+  # On an `OpenProcess` event the caller is the generating process
+  # (`ps.*`) and the process being opened is exposed through event
+  # arguments. The upstream 3.0.0 LSASS-access rule tests the target
+  # with `evt.arg[exe] imatches '?:\Windows\System32\lsass.exe'`, so
+  # `TargetImage`/`TargetProcessId` map to `evt.arg[exe]`/`evt.arg[pid]`.
+  # `GrantedAccess` maps to `ps.access.mask.names`, the human-readable
+  # slice of access-right names that Sigma rules typically test against
+  # (`ps.access.mask` exposes the raw mask value if needed).
   - id: fibratus_process_access_fields
     type: field_name_mapping
     mapping:
       SourceImage: ps.exe
       SourceProcessId: ps.pid
-      TargetImage: ps.sibling.exe
-      TargetProcessId: ps.sibling.pid
+      TargetImage: evt.arg[exe]
+      TargetProcessId: evt.arg[pid]
       GrantedAccess: ps.access.mask.names
     rule_conditions:
       - type: logsource

@@ -138,12 +138,11 @@ fn convert_simple_rule_to_fibratus_expr_format() {
         stdout.contains("spawn_process"),
         "stdout missing spawn_process: {stdout}",
     );
-    // Sigma `process_creation.CommandLine` maps to
-    // `ps.sibling.cmdline` (the spawned process's cmdline) because
-    // on a Fibratus `CreateProcess` event the new process lives
-    // under the `ps.sibling.*` namespace.
+    // Sigma `process_creation.CommandLine` maps to `ps.cmdline` (the
+    // created process's command line; Fibratus 3.0.0 unified process
+    // attributes under the `ps.*` namespace).
     assert!(
-        stdout.contains("ps.sibling.cmdline icontains 'whoami'"),
+        stdout.contains("ps.cmdline icontains 'whoami'"),
         "stdout missing renamed field: {stdout}",
     );
 }
@@ -402,7 +401,7 @@ fn list_targets() {
     Available conversion targets:
       postgres  - PostgreSQL/TimescaleDB (aliases: postgresql, pg)
       lynxdb    - LynxDB log analytics engine
-      fibratus  - Fibratus Windows kernel-event detection engine
+      fibratus  - Fibratus kernel-event detection engine
       test      - Backend-neutral test backend
     ");
 }

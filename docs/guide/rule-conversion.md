@@ -29,7 +29,7 @@ rsigma backend targets
 Available conversion targets:
   postgres  - PostgreSQL/TimescaleDB (aliases: postgresql, pg)
   lynxdb    - LynxDB log analytics engine
-  fibratus  - Fibratus Windows kernel-event detection engine
+  fibratus  - Fibratus kernel-event detection engine
   test      - Backend-neutral test backend
 ```
 
@@ -324,20 +324,20 @@ rsigma backend convert rules/ -t lynxdb -p pipeline.yml
 
 ## Fibratus
 
-The Fibratus backend produces Fibratus rule YAML — the format consumed by [Fibratus](https://github.com/rabbitstack/fibratus), an Apache-2.0 Windows kernel-event detection and EDR engine. Unlike the other two backends, Fibratus is a runtime sensor rather than a log store, so the converted rules drop directly into a Fibratus installation's `Rules/` directory and the upstream loader runs them in-place.
+The Fibratus backend produces Fibratus rule YAML — the format consumed by [Fibratus](https://github.com/rabbitstack/fibratus), an Apache-2.0 kernel-event detection and EDR engine. Unlike the other two backends, Fibratus is a runtime sensor rather than a log store, so the converted rules drop directly into a Fibratus installation's `Rules/` directory and the upstream loader runs them in-place.
 
 | Sigma feature | Fibratus syntax |
 |---------------|------------------|
-| Field equality | `field = 'value'` |
+| Field equality (literal) | `field ~= 'value'` (case-insensitive; `=` with `\|cased`; `evt.name` always uses `=`) |
 | `contains` / `startswith` / `endswith` | `field icontains 'value'`, `field istartswith 'value'`, `field iendswith 'value'` (case-insensitive by default; bare forms with `\|cased`) |
 | Wildcards (`*`, `?`) | `field imatches '*pat?ern*'` |
-| Regex (`re` modifier) | `regex(field, 'pattern') = true` |
-| CIDR (`cidr` modifier) | `cidr_contains(field, '10.0.0.0/8')` |
+| Multi-value list | `field iin ('a', 'b')` (or `imatches`/`icontains`/... lists); `\|all` stays AND-joined |
+| Regex (`re` modifier) | `regex(field, 'pattern') = true` (multi-value: one variadic call) |
+| CIDR (`cidr` modifier) | `cidr_contains(field, '10.0.0.0/8')` (multi-value: one variadic call) |
 | Numeric compare | `field > N`, `field >= N`, ... |
-| `exists` / `null` | `field != null` / `field = null` |
+| `exists` / `null` | `field != false` / `field = false`; a `null` value compares `field = ''` |
 | Fieldref | `field1 = field2` (native) |
 | Boolean AND/OR/NOT | Lowercase tokens, with OR groups inside AND explicitly parenthesized |
-| IN-list helper | `field iin ('a', 'b')` (`in` with `\|cased`) |
 
 Always pair the backend with the bundled `fibratus_windows` pipeline so Sigma's PascalCase fields (`Image`, `CommandLine`, `TargetFilename`, `TargetObject`, `DestinationIp`, ...) map to Fibratus's lowercase-dotted vocabulary (`ps.exe`, `ps.cmdline`, `file.path`, `registry.path`, `net.dip`) and so each logsource category is rewritten with the matching `evt.name` discriminator (`process_creation` -> `CreateProcess`, `network_connection` -> `Connect`, `dns_query` -> `QueryDns`, ...):
 

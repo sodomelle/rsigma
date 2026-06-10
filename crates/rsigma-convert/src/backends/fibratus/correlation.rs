@@ -6,11 +6,14 @@
 //! ```text
 //! sequence
 //! maxspan <duration>
-//!   |<stage 1 filter>
-//!   | by <group field>
-//!   |<stage 2 filter>
-//!   | by <group field>
+//! by <group field 1>, <group field 2>
+//!   |<stage 1 filter>|
+//!   |<stage 2 filter>|
 //! ```
+//!
+//! The `group-by` fields, shared across every referenced rule, are
+//! emitted once as a sequence-level `by f1, f2, ...` clause (the
+//! upstream rules-library style) rather than repeated per stage.
 //!
 //! This module builds that DSL from a [`CorrelationRule`] and the
 //! per-rule query map injected by
@@ -21,10 +24,10 @@
 //!
 //! | Sigma correlation type | Mapping                                                                       |
 //! |------------------------|-------------------------------------------------------------------------------|
-//! | `temporal_ordered`     | `sequence` with one stage per `rules:` entry, `| by <group_by>` per stage.    |
+//! | `temporal_ordered`     | `sequence` with one stage per `rules:` entry and a sequence-level `by`.       |
 //! | `temporal` (any-order) | `sequence` (ordered fallback); a `description:` note records the divergence.  |
 //! | `event_count`          | `sequence` with `<count>` repeated stages of the referenced rule.             |
-//! | `value_count`          | `sequence` with `<count>` aliased stages plus pairwise distinctness on field. |
+//! | `value_count`          | `sequence` with `<count>` stages plus positional pairwise distinctness on field. |
 //! | `value_sum` / `avg` / `percentile` / `median` | `UnsupportedCorrelation` (no Fibratus primitive).      |
 //!
 //! Repeated/distinct slot expansion is capped at
@@ -46,11 +49,11 @@ use crate::backend::Backend;
 use crate::error::{ConvertError, Result};
 
 /// Apply backend-level macro recognition to a single stage body. Each
-/// stage in a `sequence ... | <stage> | by ...` DSL is itself a
+/// stage in a `sequence ... by ... | <stage> |` DSL is itself a
 /// Fibratus filter expression, so the same `EXPRESSION_MACROS`
 /// rewriting that runs on detection rules also reads naturally here
 /// (`spawn_process and ...` rather than
-/// `evt.name imatches 'CreateProcess' and ...`).
+/// `evt.name = 'CreateProcess' and ...`).
 fn maybe_apply_macros(body: String, cfg: &FibratusConfig) -> String {
     if cfg.use_macros {
         macros::recognize(&body)
@@ -244,15 +247,7 @@ fn build_temporal_permutations(
             .iter()
             .map(|name| resolve_query(name, rule_queries).map(|body| maybe_apply_macros(body, cfg)))
             .collect::<Result<Vec<_>>>()?;
-        let mut stages_with_bindings: Vec<String> = Vec::with_capacity(stages.len());
-        for (i, body) in stages.iter().enumerate() {
-            stages_with_bindings.push(pin_group_by_after_first(body, &rule.group_by, i));
-        }
-        let condition = format_sequence(
-            &rule.timespan.original,
-            &stages_with_bindings,
-            &rule.group_by,
-        );
+        let condition = format_sequence(&rule.timespan.original, &stages, &rule.group_by);
 
         let rendered = match output_format {
             "expr" => condition,
@@ -299,7 +294,7 @@ fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
 // Sequence builder
 // ---------------------------------------------------------------------
 
-/// Build the full multi-line `sequence ... maxspan ... | stage | by ...`
+/// Build the full multi-line `sequence ... maxspan ... by ... | stage |`
 /// condition body. Stage bodies come from `_rule_queries`; missing rule
 /// references fall back to a `MissingRuleReference` error so the caller
 /// can surface it.
@@ -400,15 +395,9 @@ fn build_temporal_sequence(
         .map(|name| resolve_query(name, rule_queries).map(|body| maybe_apply_macros(body, cfg)))
         .collect::<Result<Vec<_>>>()?;
 
-    let mut stages_with_bindings: Vec<String> = Vec::with_capacity(stages.len());
-    for (idx, body) in stages.iter().enumerate() {
-        let with_binds = pin_group_by_after_first(body, &rule.group_by, idx);
-        stages_with_bindings.push(with_binds);
-    }
-
     Ok(format_sequence(
         &rule.timespan.original,
-        &stages_with_bindings,
+        &stages,
         &rule.group_by,
     ))
 }
@@ -440,10 +429,7 @@ fn build_event_count_sequence(
     }
 
     let body = maybe_apply_macros(resolve_query(&rule.rules[0], rule_queries)?, cfg);
-    let mut stages: Vec<String> = Vec::with_capacity(threshold as usize);
-    for idx in 0..threshold as usize {
-        stages.push(pin_group_by_after_first(&body, &rule.group_by, idx));
-    }
+    let stages: Vec<String> = std::iter::repeat_n(body, threshold as usize).collect();
     Ok(format_sequence(
         &rule.timespan.original,
         &stages,
@@ -452,10 +438,10 @@ fn build_event_count_sequence(
 }
 
 /// `value_count` with a small `gte`/`gt` threshold and a single
-/// `field:` → N aliased stages, each pinned on the group-by field(s),
-/// with pairwise distinctness constraints (`field != $e1.field and
-/// field != $e2.field and ...`) on the value field so the N stitched
-/// events carry distinct values.
+/// `field:` → N stages joined by the sequence-level `by` clause, with
+/// pairwise distinctness constraints expressed via positional pattern
+/// bindings (`field != $1.field and field != $2.field and ...`) on the
+/// value field so the N stitched events carry distinct values.
 fn build_value_count_sequence(
     rule: &CorrelationRule,
     rule_queries: &HashMap<String, String>,
@@ -503,18 +489,18 @@ fn build_value_count_sequence(
     let body = maybe_apply_macros(resolve_query(&rule.rules[0], rule_queries)?, cfg);
     let mut stages: Vec<String> = Vec::with_capacity(threshold as usize);
     for idx in 0..threshold as usize {
-        // Alias each stage so later stages can reference prior values.
-        let mut stage = pin_group_by_after_first(&body, &rule.group_by, idx);
-        // Pairwise distinctness against every earlier alias.
-        for prior in 0..idx {
-            stage.push_str(&format!(
-                " and {field} != $e{prior_alias}.{field}",
-                prior_alias = prior + 1
-            ));
+        let mut stage = body.clone();
+        // Pairwise distinctness against every earlier stage. Fibratus
+        // pattern bindings are positional: `$1`/`$2`/... refer to the
+        // 1-based position of a prior stage in the sequence, so the
+        // stage at 0-based index `idx` (position `idx + 1`) constrains
+        // its value field against positions `1..=idx`.
+        for prior_pos in 1..=idx {
+            stage.push_str(&format!(" and {field} != ${prior_pos}.{field}"));
         }
         stages.push(stage);
     }
-    Ok(format_sequence_aliased(
+    Ok(format_sequence(
         &rule.timespan.original,
         &stages,
         &rule.group_by,
@@ -591,64 +577,27 @@ fn strip_envelope(input: &str) -> String {
     body_lines.join(" ")
 }
 
-/// For every stage after the first, append `and $1.field = field` for
-/// every group-by field beyond the first one. Single-field group-by is
-/// expressed via the per-stage `| by <field>` clause emitted by
-/// [`format_sequence`], so this helper only emits inline bindings for
-/// the second through Nth fields where `by` cannot.
-fn pin_group_by_after_first(body: &str, group_by: &[String], stage_idx: usize) -> String {
-    if stage_idx == 0 || group_by.len() <= 1 {
-        return body.to_string();
-    }
-    let mut out = body.to_string();
-    for field in group_by.iter().skip(1) {
-        out.push_str(&format!(" and $1.{field} = {field}"));
-    }
-    out
-}
-
-/// Render `sequence`/`maxspan`/`| <stage> | by <field>` form. The first
-/// group-by field becomes the per-stage `by` key; secondary fields are
-/// pinned via inline bindings in [`pin_group_by_after_first`].
+/// Render the `sequence`/`maxspan`/`by`/`| <stage> |` form.
+///
+/// Sigma's `group-by` is a single set of join fields shared by every
+/// referenced rule, so the join is expressed once as a sequence-level
+/// `by field1, field2, ...` clause (after `maxspan`, before the stages)
+/// rather than repeated per stage. This matches the upstream Fibratus
+/// rules-library style (`sequence / maxspan 1m / by ps.uuid / |...|`)
+/// and lets multi-field group-by join on every field without inline
+/// `$1.field = field` bindings. Each stage is wrapped in `|...|`.
 fn format_sequence(timespan: &str, stages: &[String], group_by: &[String]) -> String {
     let mut out = String::with_capacity(stages.iter().map(|s| s.len()).sum::<usize>() + 64);
     out.push_str("sequence\n");
     out.push_str(&format!("maxspan {timespan}\n"));
-    let primary_by = group_by.first().map(String::as_str);
+    if !group_by.is_empty() {
+        out.push_str(&format!("by {}\n", group_by.join(", ")));
+    }
     for stage in stages {
-        out.push_str("  |");
-        out.push_str(stage);
-        out.push('\n');
-        if let Some(by) = primary_by {
-            out.push_str(&format!("  | by {by}\n"));
-        }
+        out.push_str(&format!("  |{stage}|\n"));
     }
     // Trim the trailing newline so the envelope's folded scalar gets
     // a clean last line.
-    if out.ends_with('\n') {
-        out.pop();
-    }
-    out
-}
-
-/// Same as [`format_sequence`] but emits `| as eN` aliases after each
-/// stage so subsequent stages can reference prior matched values
-/// (`$e1.field`/`$e2.field`/...). Used by the value-count distinctness
-/// emulation.
-fn format_sequence_aliased(timespan: &str, stages: &[String], group_by: &[String]) -> String {
-    let mut out = String::with_capacity(stages.iter().map(|s| s.len()).sum::<usize>() + 96);
-    out.push_str("sequence\n");
-    out.push_str(&format!("maxspan {timespan}\n"));
-    let primary_by = group_by.first().map(String::as_str);
-    for (idx, stage) in stages.iter().enumerate() {
-        out.push_str("  |");
-        out.push_str(stage);
-        out.push('\n');
-        out.push_str(&format!("  | as e{}\n", idx + 1));
-        if let Some(by) = primary_by {
-            out.push_str(&format!("  | by {by}\n"));
-        }
-    }
     if out.ends_with('\n') {
         out.pop();
     }
@@ -699,7 +648,10 @@ mod tests {
         let mut out = Vec::new();
         for query_group in &result.queries {
             for q in &query_group.queries {
-                if q.contains("sequence") || (format != "expr" && q.contains("condition: >")) {
+                // Correlation outputs carry the `sequence` keyword (in
+                // both `expr` and the folded YAML envelope); detection
+                // rules never do.
+                if q.contains("sequence") {
                     out.push(q.clone());
                 }
             }
@@ -754,16 +706,18 @@ correlation:
         .unwrap();
         assert_eq!(q.len(), 1);
         let body = &q[0];
-        assert!(body.starts_with("sequence\nmaxspan 1m\n"));
+        // The shared single group-by field becomes one sequence-level
+        // `by` clause after `maxspan`, before the stages.
+        assert!(body.starts_with("sequence\nmaxspan 1m\nby ps.pid\n"));
         // Per-stage bodies pass through the macro recognizer too, so
-        // `evt.name imatches 'Connect'` becomes `connect_socket`.
-        assert!(body.contains("|connect_socket\n"));
-        assert!(body.contains("| by ps.pid"));
-        assert!(body.contains("|spawn_process\n"));
+        // `evt.name = 'Connect'` becomes `connect_socket`; each stage is
+        // wrapped in `|...|`.
+        assert!(body.contains("|connect_socket|"));
+        assert!(body.contains("|spawn_process|"));
     }
 
     #[test]
-    fn temporal_ordered_multi_field_group_by_pins_inline_bindings() {
+    fn temporal_ordered_multi_field_group_by_uses_top_level_by() {
         let q = run(r#"
 title: First
 id: 00000000-0000-0000-0000-00000000000a
@@ -792,11 +746,16 @@ correlation:
 "#)
         .unwrap();
         let body = &q[0];
-        // Primary field via the `by` clause, secondary via inline binding.
-        assert!(body.contains("| by ps.pid"));
+        // All group-by fields collapse into a single top-level
+        // comma-separated `by` clause; no inline `$1.field = field`
+        // bindings are emitted.
         assert!(
-            body.contains("and $1.ps.username = ps.username"),
-            "expected secondary field binding, got: {body}",
+            body.contains("\nby ps.pid, ps.username\n"),
+            "expected single top-level by clause, got: {body}",
+        );
+        assert!(
+            !body.contains("$1.ps.username"),
+            "must not emit inline secondary-field bindings, got: {body}",
         );
     }
 
@@ -874,18 +833,15 @@ correlation:
         // strips the YAML envelope so we compare the bare sequence body.
         assert_eq!(q.len(), 2, "expected 2 permutations, got {q:?}");
         let joined = q.join("\n===\n");
-        // Stage A first ordering
+        // Stage A first ordering: a single top-level `by`, then the two
+        // `|...|` stages in A->B order. `evt.name` renders with `=`.
         assert!(
-            joined.contains(
-                "|evt.name imatches 'A'\n  | by ps.pid\n  |evt.name imatches 'B'\n  | by ps.pid"
-            ),
+            joined.contains("by ps.pid\n  |evt.name = 'A'|\n  |evt.name = 'B'|"),
             "missing A->B ordering, joined: {joined}"
         );
         // Stage B first ordering
         assert!(
-            joined.contains(
-                "|evt.name imatches 'B'\n  | by ps.pid\n  |evt.name imatches 'A'\n  | by ps.pid"
-            ),
+            joined.contains("by ps.pid\n  |evt.name = 'B'|\n  |evt.name = 'A'|"),
             "missing B->A ordering, joined: {joined}"
         );
     }
@@ -1336,12 +1292,12 @@ correlation:
 "#)
         .unwrap();
         let body = &q[0];
-        assert!(body.starts_with("sequence\nmaxspan 5m\n"));
-        // 3 repeated stages each followed by `| by net.sip`.
-        let stages = body.matches("|evt.name imatches 'AuthFail'\n").count();
+        assert!(body.starts_with("sequence\nmaxspan 5m\nby net.sip\n"));
+        // 3 repeated `|...|` stages and a single sequence-level `by`.
+        let stages = body.matches("|evt.name = 'AuthFail'|").count();
         assert_eq!(stages, 3, "want 3 repeated stages, got: {body}");
-        let bys = body.matches("| by net.sip").count();
-        assert_eq!(bys, 3, "want 3 by-clauses, got: {body}");
+        let bys = body.matches("by net.sip").count();
+        assert_eq!(bys, 1, "want one sequence-level by clause, got: {body}");
     }
 
     #[test]
@@ -1393,7 +1349,7 @@ correlation:
 "#)
         .unwrap();
         // gt: 2 means at-least-3 occurrences; expect 3 repeated stages.
-        let stages = q[0].matches("|evt.name imatches 'X'\n").count();
+        let stages = q[0].matches("|evt.name = 'X'|").count();
         assert_eq!(stages, 3);
     }
 
@@ -1402,7 +1358,7 @@ correlation:
     // -----------------------------------------------------------------
 
     #[test]
-    fn value_count_distinct_emits_aliased_stages_with_pairwise_inequality() {
+    fn value_count_distinct_emits_positional_pairwise_inequality() {
         let q = run(r#"
 title: AuthFail
 id: 00000000-0000-0000-0000-000000000040
@@ -1425,11 +1381,19 @@ correlation:
 "#)
         .unwrap();
         let body = &q[0];
-        assert!(body.contains("| as e1"));
-        assert!(body.contains("| as e2"));
-        assert!(body.contains("| as e3"));
-        assert!(body.contains("ps.username != $e1.ps.username"));
-        assert!(body.contains("ps.username != $e2.ps.username"));
+        // Distinctness uses positional pattern bindings ($1/$2/...),
+        // not explicit `as eN` aliases, and the join is the single
+        // sequence-level `by net.sip` clause.
+        assert!(body.starts_with("sequence\nmaxspan 5m\nby net.sip\n"));
+        assert!(!body.contains("as e"), "should not emit aliases: {body}");
+        assert!(
+            body.contains("ps.username != $1.ps.username"),
+            "got: {body}"
+        );
+        assert!(
+            body.contains("ps.username != $2.ps.username"),
+            "got: {body}"
+        );
     }
 
     #[test]
