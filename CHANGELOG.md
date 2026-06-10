@@ -4,6 +4,10 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
+### Fixed
+
+- **Daemon startup signal race.** The daemon now installs its `SIGINT`/`SIGTERM` handlers eagerly, before the API listener is announced and reachable, and reuses those same streams for the serve task's graceful shutdown. Previously the handlers were installed lazily on the serve task's first poll, so a signal arriving in the window between the socket becoming connectable (the kernel completes handshakes from the listen backlog) and that first poll hit the default disposition and killed the process instead of draining cleanly.
+
 ### Fibratus conversion backend (#191)
 
 Convert Sigma rules into rule YAML for [Fibratus](https://github.com/rabbitstack/fibratus), an Apache-2.0 kernel-event detection and EDR engine. Fibratus is the first conversion target aimed at an endpoint sensor rather than a centralized log store; rules emitted by `rsigma backend convert -t fibratus` drop into a Fibratus installation's `Rules/` directory and load with the same parser as the upstream rules library.

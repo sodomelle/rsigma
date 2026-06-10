@@ -484,6 +484,31 @@ pub async fn run_daemon(config: DaemonConfig) {
         });
     let actual_addr = listener.local_addr().unwrap_or(config.api_addr);
 
+    // Install the OS signal handlers eagerly, before the listener is
+    // announced and reachable. The kernel completes the TCP handshake for
+    // an incoming connection from the listen backlog the moment the socket
+    // is bound, well before the serve task first polls its graceful-shutdown
+    // future, so a SIGINT/SIGTERM arriving in that window would otherwise
+    // hit the default disposition and kill the process. `signal()` registers
+    // the handler at creation time (not on first poll like `ctrl_c()`), so
+    // building the shutdown future here guarantees the handler is in place
+    // before any client can observe the daemon as ready. The same streams
+    // are moved into the serve task below, so a signal delivered during the
+    // remaining setup is coalesced and still triggers a clean drain.
+    let mut shutdown_fut: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> = {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+            let sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+            Some(Box::pin(shutdown_signal(sigint, sigterm)))
+        }
+        #[cfg(not(unix))]
+        {
+            Some(Box::pin(shutdown_signal()))
+        }
+    };
+
     #[cfg(feature = "daemon-otlp")]
     let otlp_routes = {
         let grpc_service = rsigma_runtime::LogsServiceServer::new(OtlpLogsGrpcService {
@@ -1058,18 +1083,20 @@ pub async fn run_daemon(config: DaemonConfig) {
                     state.config.clone(),
                     metrics.tls_active_connections.clone(),
                 );
+                let shutdown_fut = shutdown_fut.take().expect("shutdown future consumed once");
                 tokio::spawn(async move {
                     if let Err(e) = axum::serve(tls_listener, unified_app)
-                        .with_graceful_shutdown(shutdown_signal())
+                        .with_graceful_shutdown(shutdown_fut)
                         .await
                     {
                         tracing::error!(error = %e, "server error");
                     }
                 })
             } else {
+                let shutdown_fut = shutdown_fut.take().expect("shutdown future consumed once");
                 tokio::spawn(async move {
                     if let Err(e) = axum::serve(listener, unified_app)
-                        .with_graceful_shutdown(shutdown_signal())
+                        .with_graceful_shutdown(shutdown_fut)
                         .await
                     {
                         tracing::error!(error = %e, "server error");
@@ -1079,9 +1106,10 @@ pub async fn run_daemon(config: DaemonConfig) {
         }
         #[cfg(not(feature = "daemon-tls"))]
         {
+            let shutdown_fut = shutdown_fut.take().expect("shutdown future consumed once");
             tokio::spawn(async move {
                 if let Err(e) = axum::serve(listener, unified_app)
-                    .with_graceful_shutdown(shutdown_signal())
+                    .with_graceful_shutdown(shutdown_fut)
                     .await
                 {
                     tracing::error!(error = %e, "server error");
@@ -1161,22 +1189,27 @@ pub async fn run_daemon(config: DaemonConfig) {
 }
 
 /// Wait for either SIGINT (Ctrl+C) or SIGTERM, then log and return.
-async fn shutdown_signal() {
-    let ctrl_c = tokio::signal::ctrl_c();
-
-    #[cfg(unix)]
-    {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = term.recv() => {}
-        }
+///
+/// The signal streams are created by the caller (before the API listener is
+/// announced) and moved in here, so the OS handlers are installed eagerly and
+/// a signal that races daemon startup is caught rather than killing the
+/// process under the default disposition.
+#[cfg(unix)]
+async fn shutdown_signal(
+    mut sigint: tokio::signal::unix::Signal,
+    mut sigterm: tokio::signal::unix::Signal,
+) {
+    tokio::select! {
+        _ = sigint.recv() => {}
+        _ = sigterm.recv() => {}
     }
+    tracing::info!("Shutdown signal received");
+}
 
-    #[cfg(not(unix))]
-    ctrl_c.await.ok();
-
+/// Wait for Ctrl+C, then log and return (non-Unix platforms).
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c().await.ok();
     tracing::info!("Shutdown signal received");
 }
 
