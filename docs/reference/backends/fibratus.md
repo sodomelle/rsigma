@@ -1,6 +1,6 @@
 # Fibratus Backend
 
-The `fibratus` backend converts Sigma rules into [Fibratus](https://github.com/rabbitstack/fibratus) rule YAML, the rule format consumed by Fibratus's open-source Windows kernel-event detection and EDR engine. It is the first conversion target aimed at an endpoint sensor rather than a centralized log store; the produced rules drop directly into a Fibratus installation's `Rules/` directory and are accepted by the same loader that ships with the upstream rules library.
+The `fibratus` backend converts Sigma rules into [Fibratus](https://github.com/rabbitstack/fibratus) rule YAML, the rule format consumed by Fibratus's open-source kernel-event detection and EDR engine. It is the first conversion target aimed at an endpoint sensor rather than a centralized log store; the produced rules drop directly into a Fibratus installation's `Rules/` directory and are accepted by the same loader that ships with the upstream rules library.
 
 For the workflow walkthrough see [Rule Conversion](../../guide/rule-conversion.md#fibratus). For Fibratus-side operational topics (rule installation, alerting sinks, the filter language, the macro library) see the [Fibratus documentation](https://www.fibratus.io/).
 
@@ -70,15 +70,14 @@ The pipeline maps logsource categories to `evt.name` discriminators and renames 
 |-----------------|---------------------|-------------------------------|
 | `process_creation` | `CreateProcess` | `Image -> ps.exe`, `CommandLine -> ps.cmdline`, `ProcessId -> ps.pid`, `User -> ps.username` (on a Fibratus 3.0.0 `CreateProcess` event `ps.*` is the *created* child process); `ParentImage -> ps.parent.exe`, `ParentCommandLine -> ps.parent.cmdline`, `ParentProcessId -> ps.parent.pid` (the spawning process) |
 | `process_termination` | `TerminateProcess` | `Image -> ps.exe`, `ProcessId -> ps.pid` |
-| `file_event` | `CreateFile` | `TargetFilename -> file.path`, `Image -> ps.exe` |
+| `file_event` (file creation) | `CreateFile` with `not (file.operation ~= 'OPEN')` | `TargetFilename -> file.path`, `Image -> ps.exe`. Sigma `file_event` is a file *creation* event, so the disposition guard excludes plain opens (the `create_file` macro semantics) and the rule does not fire on file access. |
 | `file_delete` | `DeleteFile` | `TargetFilename -> file.path` |
 | `network_connection` | `Connect` | `DestinationIp -> net.dip`, `DestinationPort -> net.dport`, `DestinationPortName -> net.dport.name`, `SourceIp -> net.sip`, `Protocol -> net.l4.proto` |
 | `dns_query` | `QueryDns` | `QueryName -> dns.name`, `QueryStatus -> dns.rcode`, `QueryResults -> dns.answers` |
-| `image_load` | `LoadModule` | `ImageLoaded -> module.path`, `OriginalFileName -> pe.file.name`, `Signed -> module.signature.exists`, `Signature -> module.signature.subject` |
-| `registry_set` | `RegSetValue` | `TargetObject -> registry.path`, `Details -> registry.value` |
+| `image_load` | `LoadModule` | `ImageLoaded -> module.path`, `OriginalFileName -> module.path`, `Signed -> module.signature.exists`, `Signature -> module.signature.subject` |
+| `registry_set` | `RegSetValue` | `TargetObject -> registry.path`, `Details -> registry.data` |
 | `registry_add` | `RegCreateKey` | `TargetObject -> registry.path` |
 | `registry_delete` | `RegDeleteKey` | `TargetObject -> registry.path` |
-| `pipe_created` | `CreateFile` + `file.type = 'Pipe'` | `PipeName -> file.name` |
 | `create_remote_thread` | `CreateThread` | `SourceImage -> ps.exe`, `SourceProcessId -> ps.pid`, `TargetProcessId -> thread.pid`, `StartAddress -> thread.start_address`, `StartModule -> thread.start_address.module`, `StartFunction -> thread.start_address.symbol` (no `thread.image` field exists on `CreateThread` events; Sigma `TargetImage` rules fail conversion under this logsource) |
 | `driver_load` | `LoadModule` | `ImageLoaded -> module.path`, `Signed -> module.signature.exists`, `Signature -> module.signature.subject` |
 | `process_access` | `OpenProcess` | `SourceImage -> ps.exe`, `SourceProcessId -> ps.pid` (the caller); `TargetImage -> evt.arg[exe]`, `TargetProcessId -> evt.arg[pid]` (the opened process, exposed as event arguments; the upstream 3.0.0 LSASS-access rule tests `evt.arg[exe] imatches '?:\Windows\System32\lsass.exe'`); `GrantedAccess -> ps.access.mask.names` (named access-right slice) |
@@ -196,6 +195,7 @@ min-engine-version: 3.0.0
 
 - **`create_remote_thread.TargetImage`.** The `process_access` logsource's target-process fields map to event arguments (`evt.arg[exe]`, `evt.arg[pid]`), but a bare `CreateThread` event does not expose the target executable path the way `OpenProcess` does. Sigma rules under `create_remote_thread` that reference `TargetImage` fail conversion with an unsupported-field error; pair with a custom pipeline if your Fibratus build exposes it under another name. `TargetProcessId` maps to `thread.pid` (the cross-process pointer the `create_remote_thread` macro itself uses).
 - **`|all` multi-value lists.** A Fibratus list right-hand side (`field in (...)`, `field icontains (...)`, ...) carries OR ("any of") semantics, so the AND semantics of Sigma's `|all` modifier cannot collapse into a single list clause; those values stay AND-joined as separate clauses.
+- **Named pipes (`pipe_created`).** Fibratus has no visibility into named-pipe events without a dedicated kernel driver, so the `pipe_created` logsource is intentionally not mapped; such rules fall through unmapped (and fail conversion) rather than aliasing to an unrelated event.
 
 ## Related material
 

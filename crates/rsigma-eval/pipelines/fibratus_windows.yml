@@ -86,7 +86,15 @@ transformations:
         category: process_termination
         product: windows
 
-  # --- File events ---
+  # --- File events (file creation) ---
+  #
+  # Sigma's `file_event` is a file *creation* event. Fibratus's
+  # `CreateFile` kernel event covers both opens and creations, so the
+  # creation case is the `create_file` macro: a `CreateFile` event whose
+  # disposition is anything other than `OPEN`. The event-name predicate
+  # is prepended and the `file.operation != 'OPEN'` guard is added as a
+  # negated `OPEN` comparison so a Sigma `file_event` rule does not also
+  # fire on plain file opens (which belong to a separate access event).
   - id: fibratus_file_event_fields
     type: field_name_mapping
     mapping:
@@ -107,6 +115,18 @@ transformations:
     prepend: true
     conditions:
       evt.name: CreateFile
+    rule_conditions:
+      - type: logsource
+        category: file_event
+        product: windows
+
+  - id: fibratus_file_event_not_open
+    type: add_condition
+    # Exclude the OPEN disposition so this matches file creation
+    # (the `create_file` macro), not file access.
+    negated: true
+    conditions:
+      file.operation: OPEN
     rule_conditions:
       - type: logsource
         category: file_event
@@ -201,13 +221,13 @@ transformations:
   # `module.*` for loaded executables/DLLs. `SignatureStatus`, `Hashes`,
   # and `Imphash` have no `module.*` field and are dropped (Sigma rules
   # using them under this logsource fail conversion rather than emit a
-  # field the loader rejects); `OriginalFileName` maps to the PE
-  # metadata field `pe.file.name`.
+  # field the loader rejects); both `ImageLoaded` and `OriginalFileName`
+  # map to `module.path`.
   - id: fibratus_image_load_fields
     type: field_name_mapping
     mapping:
       ImageLoaded: module.path
-      OriginalFileName: pe.file.name
+      OriginalFileName: module.path
       Image: ps.exe
       ProcessId: ps.pid
       Signed: module.signature.exists
@@ -235,7 +255,7 @@ transformations:
     type: field_name_mapping
     mapping:
       TargetObject: registry.path
-      Details: registry.value
+      Details: registry.data
       Image: ps.exe
       ProcessId: ps.pid
     rule_conditions:
@@ -247,7 +267,7 @@ transformations:
     type: field_name_mapping
     mapping:
       TargetObject: registry.path
-      Details: registry.value
+      Details: registry.data
       Image: ps.exe
       ProcessId: ps.pid
     rule_conditions:
@@ -317,30 +337,11 @@ transformations:
         product: windows
 
   # --- Pipe created ---
-  - id: fibratus_pipe_created_fields
-    type: field_name_mapping
-    mapping:
-      PipeName: file.name
-      Image: ps.exe
-      ProcessId: ps.pid
-    rule_conditions:
-      - type: logsource
-        category: pipe_created
-        product: windows
-
-  - id: fibratus_pipe_created_event
-    type: add_condition
-    # Put the event-name discriminator first so Fibratus's
-    # left-to-right evaluation short-circuits on the cheapest, most
-    # selective predicate before the rule body.
-    prepend: true
-    conditions:
-      evt.name: CreateFile
-      file.type: Pipe
-    rule_conditions:
-      - type: logsource
-        category: pipe_created
-        product: windows
+  #
+  # Not mapped: Fibratus has no visibility into named-pipe events
+  # without a dedicated kernel driver, so there is no faithful target
+  # event. Sigma `pipe_created` rules fall through unmapped (and fail
+  # conversion) rather than silently aliasing to an unrelated event.
 
   # --- Create remote thread ---
   #
