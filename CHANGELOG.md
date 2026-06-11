@@ -10,7 +10,7 @@ RSigma v0.15.0 is the "new conversion target and Sigma extensions" release:
 * Array matching: `[any]`/`[all]`/`[all_or_empty]`/`[none]` object-scope blocks, implicit any-member matching, and positional indexing (`args[0]`, negative indices), evaluated in the engine and lowered to PostgreSQL JSONB (#159).
 * Declarable correlation window modes: `sliding`/`tumbling`/`session` windows plus a session `gap`, end to end across the parser, runtime evaluator, and PostgreSQL conversion, with pySigma-style `correlation_method` selection at convert time (#192).
 * `sigma-version`: an optional top-level spec-major attribute that gates breaking spec changes by the declared version (array matching now activates only at major `3`), plus cross-document reference lints (#188).
-* `rstix`: a new STIX 2.1 + TAXII 2.1 library crate; Phase 1 lands the core foundation (validated typed IDs, timestamps, deterministic SCO IDs, controlled vocabularies) (#185).
+* `rstix`: a new STIX 2.1 + TAXII 2.1 library crate; Phase 1 lands the core foundation (validated typed IDs, timestamps, deterministic SCO IDs, controlled vocabularies) (#185), thanks to @SecurityEnthusiast.
 * Gated match-detail enrichment: a new `MatchDetailLevel` (`off`/`summary`/`full`) that explains why each field matched, off by default so the default wire shape is byte-for-byte unchanged (#186).
 * RFC 5424 syslog now strips a leading UTF-8 BOM by default, fixing corrupted `_raw` fields, broken anchored matchers, and BOM-blocked embedded-JSON detection (#187).
 * Daemon shutdown fix: `SIGINT`/`SIGTERM` handlers are now installed before the API listener is announced, closing a startup race that could hard-kill the process instead of draining cleanly.
