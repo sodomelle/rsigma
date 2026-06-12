@@ -44,6 +44,12 @@ harness = false
 name = "correlation"
 harness = false
 
+# Not a Criterion bench: measures peak heap via a counting global allocator
+# (window-mode memory stress). Prints an aligned results table.
+[[bench]]
+name = "correlation_memory"
+harness = false
+
 [[bench]]
 name = "result_serialize"
 harness = false
