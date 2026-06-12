@@ -14,9 +14,11 @@ where
     T: DeserializeOwned + Serialize + PartialEq + Debug,
 {
     let json = load_spec_fixture(relative_path);
+    let original: serde_json::Value = serde_json::from_str(&json).expect("parse fixture");
     let parsed: T = serde_json::from_str(&json).expect("deserialize");
-    let reserialized = serde_json::to_string(&parsed).expect("serialize");
-    let reparsed: T = serde_json::from_str(&reserialized).expect("reparse");
+    let reserialized_value = serde_json::to_value(&parsed).expect("serialize to value");
+    assert_reserialized_matches_fixture(&original, &reserialized_value);
+    let reparsed: T = serde_json::from_value(reserialized_value).expect("reparse");
     assert_eq!(parsed, reparsed);
     parsed
 }
@@ -28,4 +30,33 @@ pub fn assert_fixture_rejects<T: DeserializeOwned>(relative_path: &str) {
         serde_json::from_str::<T>(&json).is_err(),
         "expected {relative_path} to fail deserialization"
     );
+}
+
+/// Compare the re-serialized value against the original fixture.
+///
+/// Fixtures for common-property structs may carry SDO-specific keys (`type`,
+/// `name`, …) that the type deliberately ignores today; for those object
+/// fixtures every emitted field must match the fixture, but extra fixture keys
+/// are allowed. Standalone type fixtures (for example `ExternalReference`) use
+/// full value equality. Once concrete SDO/SRO types land in later slices, full
+/// fixture comparison will catch dropped fields for free.
+fn assert_reserialized_matches_fixture(
+    original: &serde_json::Value,
+    reserialized: &serde_json::Value,
+) {
+    match (original, reserialized) {
+        (serde_json::Value::Object(original), serde_json::Value::Object(reserialized)) => {
+            for (key, reserialized_value) in reserialized {
+                assert_eq!(
+                    original.get(key),
+                    Some(reserialized_value),
+                    "reserialized field `{key}` does not match fixture"
+                );
+            }
+        }
+        _ => assert_eq!(
+            original, reserialized,
+            "reserialized value does not match fixture"
+        ),
+    }
 }

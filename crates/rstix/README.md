@@ -27,7 +27,7 @@ This library is part of [rsigma].
 ### Error types
 
 - `ParseError`: top-level parse error enum. The current phase includes only `NotImplemented`.
-- `model::ModelError`: model-level invariant violations (for example non-empty `source_name`, granular-marking exclusivity).
+- `model::ModelError`: model-level invariant violations (for example non-empty `source_name`, external-reference §2.5.2 detail fields, granular-marking exclusivity and selectors).
 - `core::StixIdError`: errors for STIX ID parsing and typed-ID conversion.
 - `core::TimestampError`: errors for STIX/TAXII timestamp parsing.
 - `core::ConfidenceError`: confidence range and scale-label errors.
@@ -40,7 +40,7 @@ This library is part of [rsigma].
 - `model` (always): `ModelError`; `model::common` — `SdoSroCommonProps`, `ScoCommonProps`, `ExternalReference`, `GranularMarking`, `ExtensionMap`, and related types.
 - `id` (always): deterministic SCO ID derivation (`select_id_contributing_properties`, canonicalization, UUIDv5 generation).
 - `vocab` (always): open/closed vocabulary tables and `OpinionValue` ordering enum.
-- `serde_impls` (internal, `serde` feature): hand-written serializers for `StixId` and timestamps; typed-ID serde is generated in the `define_typed_id!` macro.
+- `serde_impls` (internal, `serde` feature): hand-written serializers for `StixId`, timestamps, and `Confidence`; typed-ID serde is generated in the `define_typed_id!` macro.
 
 ## Feature flags
 

@@ -6,8 +6,9 @@ use crate::model::ModelError;
 /// A granular marking applies a marking-definition reference *or* a language to
 /// a set of selectors within an object.
 ///
-/// STIX requires that **exactly one** of `marking_ref` or `lang` be present.
-/// The invariant is enforced by [`new`] and on deserialization.
+/// STIX requires that **exactly one** of `marking_ref` or `lang` be present and
+/// that `selectors` be non-empty. The invariants are enforced by [`new`] and on
+/// deserialization.
 ///
 /// # Examples
 ///
@@ -44,28 +45,24 @@ pub struct GranularMarking {
 
 impl GranularMarking {
     /// Construct a marking carrying a marking-definition reference.
-    pub fn with_marking_ref(selectors: Vec<String>, marking_ref: MarkingDefinitionId) -> Self {
-        Self {
-            selectors,
-            marking_ref: Some(marking_ref),
-            lang: None,
-        }
+    pub fn with_marking_ref(
+        selectors: Vec<String>,
+        marking_ref: MarkingDefinitionId,
+    ) -> Result<Self, ModelError> {
+        Self::new(selectors, Some(marking_ref), None)
     }
 
     /// Construct a marking carrying a language tag.
-    pub fn with_lang(selectors: Vec<String>, lang: LanguageTag) -> Self {
-        Self {
-            selectors,
-            marking_ref: None,
-            lang: Some(lang),
-        }
+    pub fn with_lang(selectors: Vec<String>, lang: LanguageTag) -> Result<Self, ModelError> {
+        Self::new(selectors, None, Some(lang))
     }
 
     /// Construct from raw optional parts, enforcing the `marking_ref` XOR `lang`
     /// invariant.
     ///
     /// Returns [`ModelError::GranularMarkingExclusivity`] when both or neither
-    /// are present.
+    /// are present, or [`ModelError::GranularMarkingEmptySelectors`] when
+    /// `selectors` is empty.
     pub fn new(
         selectors: Vec<String>,
         marking_ref: Option<MarkingDefinitionId>,
@@ -80,8 +77,11 @@ impl GranularMarking {
         Ok(marking)
     }
 
-    /// Check the `marking_ref` XOR `lang` invariant.
+    /// Check selector and `marking_ref` XOR `lang` invariants.
     pub fn validate(&self) -> Result<(), ModelError> {
+        if self.selectors.is_empty() {
+            return Err(ModelError::GranularMarkingEmptySelectors);
+        }
         match (self.marking_ref.is_some(), self.lang.is_some()) {
             (true, false) | (false, true) => Ok(()),
             _ => Err(ModelError::GranularMarkingExclusivity),
@@ -97,7 +97,6 @@ impl<'de> serde::Deserialize<'de> for GranularMarking {
     {
         #[derive(serde::Deserialize)]
         struct Raw {
-            #[serde(default)]
             selectors: Vec<String>,
             #[serde(default)]
             marking_ref: Option<MarkingDefinitionId>,

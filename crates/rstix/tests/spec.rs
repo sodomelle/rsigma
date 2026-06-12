@@ -7,7 +7,7 @@
 
 mod support;
 
-use rstix::core::SpecVersion;
+use rstix::core::{Confidence, SpecVersion};
 use rstix::model::ModelError;
 use rstix::model::common::{
     ExtensionMap, ExtensionType, ExternalReference, GranularMarking, ScoCommonProps,
@@ -85,6 +85,17 @@ fn external_reference_round_trips_full_fixture() {
 }
 
 #[test]
+fn sdo_sro_confidence_round_trips_and_rejects_out_of_range() {
+    let parsed = support::roundtrip::<SdoSroCommonProps>("common/sdo_confidence.json");
+    assert_eq!(
+        parsed.confidence,
+        Some(Confidence::new(85).expect("in range"))
+    );
+
+    support::assert_fixture_rejects::<SdoSroCommonProps>("common/sdo_confidence-out-of-range.json");
+}
+
+#[test]
 fn external_reference_minimal_omits_empty_optionals() {
     let parsed = support::roundtrip::<ExternalReference>("common/external-reference-minimal.json");
     let value = serde_json::to_value(&parsed).expect("serialize");
@@ -92,7 +103,11 @@ fn external_reference_minimal_omits_empty_optionals() {
         value.get("source_name").and_then(|v| v.as_str()),
         Some("capec")
     );
-    for absent in ["description", "url", "hashes", "external_id"] {
+    assert_eq!(
+        value.get("external_id").and_then(|v| v.as_str()),
+        Some("CAPEC-163")
+    );
+    for absent in ["description", "url", "hashes"] {
         assert!(
             value.get(absent).is_none(),
             "expected {absent} to be omitted"
@@ -103,8 +118,16 @@ fn external_reference_minimal_omits_empty_optionals() {
 #[test]
 fn external_reference_new_rejects_empty_source_name() {
     assert_eq!(
-        ExternalReference::new("   ").unwrap_err(),
+        ExternalReference::new("   ", None, None, None).unwrap_err(),
         ModelError::ExternalReferenceMissingSourceName
+    );
+}
+
+#[test]
+fn external_reference_new_rejects_source_name_without_detail() {
+    assert_eq!(
+        ExternalReference::new("capec", None, None, None).unwrap_err(),
+        ModelError::ExternalReferenceMissingDetail
     );
 }
 
@@ -115,6 +138,9 @@ fn external_reference_rejects_invalid_fixtures() {
     );
     support::assert_fixture_rejects::<ExternalReference>(
         "common/external-reference-empty-source.json",
+    );
+    support::assert_fixture_rejects::<ExternalReference>(
+        "common/external-reference-source-only.json",
     );
 }
 
@@ -164,4 +190,18 @@ fn granular_marking_round_trips_lang() {
 fn granular_marking_rejects_both_and_neither() {
     support::assert_fixture_rejects::<GranularMarking>("common/granular-marking-both.json");
     support::assert_fixture_rejects::<GranularMarking>("common/granular-marking-neither.json");
+}
+
+#[test]
+fn granular_marking_rejects_empty_selectors() {
+    support::assert_fixture_rejects::<GranularMarking>(
+        "common/granular-marking-empty-selectors.json",
+    );
+}
+
+#[test]
+fn granular_marking_rejects_missing_selectors() {
+    support::assert_fixture_rejects::<GranularMarking>(
+        "common/granular-marking-missing-selectors.json",
+    );
 }

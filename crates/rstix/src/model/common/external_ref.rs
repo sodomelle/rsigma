@@ -6,15 +6,18 @@ use crate::model::ModelError;
 
 /// A STIX external reference.
 ///
-/// `source_name` is required and must be non-empty. The invariant is enforced by
-/// [`new`] and on deserialization when the `serde` feature is enabled.
+/// `source_name` is required and must be non-empty. STIX §2.5.2 requires at
+/// least one of `description`, `url`, or `external_id` alongside `source_name`.
+/// Both rules are enforced by [`new`] and on deserialization when the `serde`
+/// feature is enabled.
 ///
 /// # Examples
 ///
 /// ```
 /// use rstix::model::common::ExternalReference;
 ///
-/// let reference = ExternalReference::new("capec").expect("valid source_name");
+/// let reference = ExternalReference::new("capec", None, None, Some("CAPEC-163".into()))
+///     .expect("valid reference");
 /// assert!(reference.validate().is_ok());
 /// ```
 ///
@@ -51,23 +54,36 @@ pub struct ExternalReference {
 }
 
 impl ExternalReference {
-    /// Construct a reference with only the required `source_name` set.
+    /// Construct a reference, enforcing STIX §2.5.2 invariants.
     ///
     /// Returns [`ModelError::ExternalReferenceMissingSourceName`] when
-    /// `source_name` is empty or whitespace-only.
-    pub fn new(source_name: impl Into<String>) -> Result<Self, ModelError> {
+    /// `source_name` is empty or whitespace-only, or
+    /// [`ModelError::ExternalReferenceMissingDetail`] when none of
+    /// `description`, `url`, or `external_id` are set.
+    pub fn new(
+        source_name: impl Into<String>,
+        description: Option<String>,
+        url: Option<String>,
+        external_id: Option<String>,
+    ) -> Result<Self, ModelError> {
         let reference = Self {
             source_name: source_name.into(),
+            description,
+            url,
+            external_id,
             ..Self::default()
         };
         reference.validate()?;
         Ok(reference)
     }
 
-    /// Validate the `source_name` invariant.
+    /// Validate STIX §2.5.2 invariants on `source_name` and detail fields.
     pub fn validate(&self) -> Result<(), ModelError> {
         if self.source_name.trim().is_empty() {
             return Err(ModelError::ExternalReferenceMissingSourceName);
+        }
+        if self.description.is_none() && self.url.is_none() && self.external_id.is_none() {
+            return Err(ModelError::ExternalReferenceMissingDetail);
         }
         Ok(())
     }

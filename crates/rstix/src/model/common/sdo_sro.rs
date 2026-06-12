@@ -2,7 +2,7 @@
 //! Objects (STIX §3.2).
 
 use crate::core::{
-    IdentityId, LanguageTag, MarkingDefinitionId, SpecVersion, StixId, StixTimestamp,
+    Confidence, IdentityId, LanguageTag, MarkingDefinitionId, SpecVersion, StixId, StixTimestamp,
 };
 use crate::model::common::{ExtensionMap, ExternalReference, GranularMarking};
 
@@ -56,7 +56,7 @@ pub struct SdoSroCommonProps {
         feature = "serde",
         serde(default, skip_serializing_if = "Option::is_none")
     )]
-    pub confidence: Option<u8>,
+    pub confidence: Option<Confidence>,
     /// Primary language of the object's text content.
     #[cfg_attr(
         feature = "serde",

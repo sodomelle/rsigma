@@ -90,8 +90,8 @@ pub struct ExtensionEntry {
 /// use rstix::model::common::{ExtensionEntry, ExtensionMap, ExtensionType};
 ///
 /// let mut map = ExtensionMap::default();
-/// map.0.insert(
-///     "extension-definition--00000000-0000-0000-0000-000000000001".into(),
+/// map.insert(
+///     "extension-definition--00000000-0000-0000-0000-000000000001",
 ///     ExtensionEntry {
 ///         extension_type: Some(ExtensionType::PropertyExtension),
 ///         properties: Default::default(),
@@ -118,5 +118,15 @@ impl ExtensionMap {
     /// Borrow an entry by extension id.
     pub fn get(&self, id: &str) -> Option<&ExtensionEntry> {
         self.0.get(id)
+    }
+
+    /// Insert an extension entry, returning the previous entry when the id
+    /// was already present.
+    pub fn insert(
+        &mut self,
+        id: impl Into<String>,
+        entry: ExtensionEntry,
+    ) -> Option<ExtensionEntry> {
+        self.0.insert(id.into(), entry)
     }
 }
