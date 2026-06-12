@@ -26,6 +26,7 @@ cargo bench
 cargo bench -p rsigma-parser --bench parse
 cargo bench -p rsigma-eval --bench eval
 cargo bench -p rsigma-eval --bench correlation
+cargo bench -p rsigma-eval --bench correlation_memory   # peak-heap stress (not Criterion)
 cargo bench -p rsigma-runtime --bench runtime_throughput
 cargo bench -p rsigma-runtime --bench dynamic_pipelines
 
@@ -218,6 +219,46 @@ Run with `cargo bench -p rsigma-eval --features daachorse-index --bench eval -- 
 | 10,000 | 7.97 ms | 1.25 Melem/s |
 | 50,000 | 41.5 ms | 1.20 Melem/s |
 
+### Window Modes: sliding vs tumbling vs session (0.15.0)
+
+Apple M4 Pro, macOS, release build, 2026-06-12. Identical `event_count` workload for all three modes: 10,000 events across 1,000 group keys, one event per group per 10s tick, 1h window, 10m session gap. The window decision in `apply_window_open` is O(1) (deque front/back inspection), so the three modes cost the same per event.
+
+| Window mode | Time (median) | Throughput |
+|-------------|---------------|------------|
+| `sliding` (default) | 7.25 ms | 1.38 Melem/s |
+| `tumbling` | 6.69 ms | 1.49 Melem/s |
+| `session` | 6.74 ms | 1.48 Melem/s |
+
+Run with `cargo bench -p rsigma-eval --bench correlation -- correlation_window_modes`.
+
+### Window-Mode Memory Stress (0.15.0)
+
+Apple M4 Pro, macOS, release build, 2026-06-12. The `correlation_memory` bench is not a Criterion suite: it installs a counting global allocator and reports **peak** and **settled** heap deltas over the engine baseline, isolating window-state maintenance (alert thresholds are unreachable; event construction is excluded from the deltas). It reproduces the two scenarios from the [SEP #214](https://github.com/SigmaHQ/sigma-specification/issues/214) discussion on memory becoming the bottleneck in stateful window correlation.
+
+**A. High-cardinality session windows** (one event per unique key, `event_count`, gap 5m, cap 2h) — exercises the `max_state_entries` hard cap and stalest-first eviction:
+
+| Configuration | Throughput | Peak heap | Settled | Live groups |
+|---------------|-----------:|----------:|--------:|------------:|
+| 100k keys, default cap (100k) | 789 Kelem/s | 20.5 MiB | 17.7 MiB | 100,000 |
+| 1M keys, default cap (100k) | 898 Kelem/s | 39.8 MiB | 22.4 MiB | capped |
+| 1M keys, cap raised to 2M | 805 Kelem/s | 327.4 MiB | 243.8 MiB | 1,000,000 |
+
+A live session group costs ~256 B settled, dominated by the `GroupKey` heap strings rather than the timestamps. Throughput under active eviction is the highest of the three runs because the state map stays small; the eviction sort is amortized over the 10% headroom the cap reclaims.
+
+**B. Long-lived chatty sessions** (groups emitting continuously inside an open session; gap never exceeded, so the per-group deque grows to timespan/interval entries):
+
+| Workload | Throughput | Peak heap | Bytes/in-window event |
+|----------|-----------:|----------:|----------------------:|
+| `event_count` session, 1k groups @ 30s (240 ev/window) | 1.16 Melem/s | 2.2 MiB | 8 B |
+| `event_count` sliding, 1k groups @ 30s (240 ev/window) | 1.14 Melem/s | 2.2 MiB | 8 B |
+| `value_count` session, 1k groups @ 30s, distinct strings | 324 Kelem/s | 21.1 MiB | ~92 B |
+| `event_count` session, 100 groups @ 1 ev/s (7,200 ev/window) | 1.13 Melem/s | 6.3 MiB | 9 B |
+| `value_count` session, 100 groups @ 1 ev/s, distinct (1,800 ev/window) | 63 Kelem/s | 16.0 MiB | ~93 B |
+
+**C. Mode comparison** (10k groups, 1M events, 1h window): sliding 1.10 Melem/s, tumbling 1.06 Melem/s, session 1.06 Melem/s — all 6.6 MiB peak. Memory differences between modes come only from how long entries are retained, not from per-event overhead.
+
+Run with `cargo bench -p rsigma-eval --bench correlation_memory` (about half a minute total).
+
 ---
 
 ## Runtime (`rsigma-runtime`)
@@ -333,6 +374,9 @@ Full pipeline: resolve source, expand templates, apply value_placeholders, evalu
 - **Runtime overhead is negative**: LogProcessor with JSON batching is actually faster than raw Engine evaluation due to batch-level optimizations and format-aware parsing.
 - **Rule count scales well**: Increasing from 100 to 1000 rules has minimal per-event cost increase (~50%) thanks to indexed field matching.
 - **Correlation is efficient**: Temporal correlations (2.1M elem/s) are 2x faster than event-count correlations (1.05M elem/s), and both scale linearly with events.
+- **Window modes cost the same per event**: sliding, tumbling, and session all run at ~1.4-1.5 Melem/s on an identical workload. The window decision is O(1); choosing `session` over `sliding` is free at evaluation time.
+- **Correlation memory is bounded by entry count, not bytes**: the `max_state_entries` cap (default 100k) held 1M unique session keys to a 39.8 MiB peak via stalest-first eviction. Within the cap, per-group deques grow with timespan x event rate: 8 B per in-window event for `event_count`, ~92 B for `value_count` with distinct string values.
+- **`value_count` distinct counting is the correlation bottleneck**: the distinct count is recomputed per event over the whole window (O(W) per event), so throughput drops from ~1.1 Melem/s to 63 Kelem/s at 1,800 distinct values per window — CPU collapses before memory does. Prefer shorter windows or `event_count` where distinctness is not required.
 - **Template expansion is negligible**: Even with 20 vars, expansion adds < 10 us. Not a bottleneck.
 - **JSONPath is the fastest extraction language**: Roughly 2x faster than JQ for comparable filter operations on dynamic source data.
 - **CEL has high overhead**: ~160x slower than JSONPath for list filtering due to interpretation overhead. Best suited for simple field access or small datasets.

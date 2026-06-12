@@ -132,7 +132,16 @@ The trade-off: a higher `--batch-size` increases tail latency (an event waits up
 
 ## Memory pressure and correlation state
 
-Correlation state lives in memory unless `--state-db` writes periodic snapshots to SQLite. The hard cap is `max_state_entries`, default 100,000 entries per correlation rule. When the cap is hit, the engine evicts the stalest 10% and emits a warning.
+Correlation state lives in memory unless `--state-db` writes periodic snapshots to SQLite. The hard cap is `max_state_entries`, default 100,000 `(correlation, group-key)` entries across all correlation rules. When the cap is hit, the engine evicts the stalest 10% and emits a warning.
+
+The cap bounds the number of groups, not bytes. Within a live group, the window state grows with `timespan` x event rate: 8 bytes per in-window event for `event_count`, 16 for the numeric aggregations (`value_sum`/`value_avg`/`value_percentile`/`value_median`), and roughly 32 bytes plus the value string for `value_count`. The measured shape (see [Benchmarks](../benchmarks.md#window-mode-memory-stress-0150)): 1M unique session keys against the default cap peaked at 39.8 MiB, and a fully chatty `event_count` workload (100 groups sustaining 1 event/s through a 2h session cap) held 6.3 MiB. A live but quiet session group costs ~256 bytes, dominated by the group-key strings.
+
+Window modes (`sliding`/`tumbling`/`session`) have identical per-event cost; they differ only in how long entries are retained. `tumbling` resets per-group state at each bucket boundary and is the cheapest under sustained load; `session` retains everything between the first event and the `timespan` cap, so it is the mode to watch on chatty groups.
+
+Two workload shapes deserve attention:
+
+- **`value_count` with high-cardinality values.** Every `(timestamp, value)` pair is retained for the window, and the distinct count is recomputed per event over the whole window — O(window size) per event. At 1,800 distinct values per window, measured throughput drops from ~1.1M to 63K events/s. CPU collapses before memory does. Prefer `event_count` where distinctness is not actually required, or shorten the window.
+- **Group-key cardinality floods.** Under cap pressure the stalest groups are evicted first, so a burst of unique keys can push a slow-burning session out of state before it completes. The eviction warning in the log is the tripwire; raise `max_state_entries` if the warning fires during legitimate traffic.
 
 Watch:
 

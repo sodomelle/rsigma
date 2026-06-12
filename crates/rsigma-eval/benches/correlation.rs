@@ -288,6 +288,94 @@ level: high
 }
 
 // ---------------------------------------------------------------------------
+// Benchmark: window modes (sliding vs tumbling vs session)
+// ---------------------------------------------------------------------------
+
+fn bench_correlation_window_modes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("correlation_window_modes");
+    group.sample_size(20);
+
+    // Identical workload for all three modes: 10k events spread over 1k
+    // group keys, one event per group per 10s tick, 1h window. The session
+    // gap (10m) exceeds the tick interval so sessions stay open until the
+    // timespan cap, matching the sliding window's retention.
+    let yaml_for = |window_block: &str| {
+        format!(
+            r#"
+title: Base Rule
+id: bench-base-001
+logsource:
+    product: windows
+detection:
+    selection:
+        EventType: 'process_create'
+    condition: selection
+level: low
+---
+title: Window Mode Corr
+id: corr-window-001
+correlation:
+    type: event_count
+    rules:
+        - bench-base-001
+    group-by:
+        - User
+    timespan: 3600s
+{window_block}    condition:
+        gte: 1000000
+level: high
+"#
+        )
+    };
+
+    let n_events = 10_000usize;
+    let n_groups = 1_000usize;
+    let event_values: Vec<serde_json::Value> = (0..n_groups)
+        .map(|g| {
+            serde_json::json!({
+                "EventType": "process_create",
+                "User": format!("user_{g:04}"),
+                "CommandLine": "whoami",
+            })
+        })
+        .collect();
+    let events: Vec<JsonEvent> = event_values.iter().map(JsonEvent::borrow).collect();
+
+    for (mode, window_block) in [
+        ("sliding", ""),
+        ("tumbling", "    window: tumbling\n"),
+        ("session", "    window: session\n    gap: 600s\n"),
+    ] {
+        let yaml = yaml_for(window_block);
+        let collection = parse_sigma_yaml(&yaml).unwrap();
+
+        group.throughput(criterion::Throughput::Elements(n_events as u64));
+
+        group.bench_with_input(BenchmarkId::new("mode", mode), &events, |b, events| {
+            b.iter_with_setup(
+                || {
+                    let mut engine = CorrelationEngine::new(CorrelationConfig::default());
+                    engine.add_collection(&collection).unwrap();
+                    engine
+                },
+                |mut engine| {
+                    let base_ts = 1_000_000i64;
+                    for i in 0..n_events {
+                        let event = &events[i % n_groups];
+                        // One event per group per 10s tick.
+                        let ts = base_ts + (i / n_groups) as i64 * 10;
+                        let result = engine.process_event_at(black_box(event), ts);
+                        black_box(&result);
+                    }
+                },
+            );
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Criterion harness
 // ---------------------------------------------------------------------------
 
@@ -298,5 +386,6 @@ criterion_group!(
     bench_correlation_throughput,
     bench_correlation_batch,
     bench_correlation_state_pressure,
+    bench_correlation_window_modes,
 );
 criterion_main!(benches);

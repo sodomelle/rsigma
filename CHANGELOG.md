@@ -2,6 +2,16 @@
 
 All notable changes to RSigma are documented in this file. Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma/releases).
 
+## [Unreleased]
+
+### Correlation window-mode benchmarks: throughput and peak-memory stress suite (#199)
+
+Two new benchmark surfaces for the correlation window modes shipped in #192, prompted by the [SEP #214](https://github.com/SigmaHQ/sigma-specification/issues/214) discussion on memory becoming the bottleneck in stateful window correlation (high-cardinality group keys, long-lived sessions).
+
+- **`correlation_window_modes` Criterion group** (`cargo bench -p rsigma-eval --bench correlation -- correlation_window_modes`): sliding vs tumbling vs session on an identical `event_count` workload. All three modes run at ~1.4-1.5 Melem/s — the window decision in `apply_window_open` is O(1), so declaring `window: session` is free at evaluation time.
+- **`correlation_memory` bench target** (`cargo bench -p rsigma-eval --bench correlation_memory`): not a Criterion suite — it installs a counting global allocator and reports peak/settled heap deltas, which Criterion cannot observe. Three scenario families: high-cardinality session keys against the `max_state_entries` cap (1M unique keys held to a 39.8 MiB peak by stalest-first eviction; ~256 B per live session group uncapped), long-lived chatty sessions (8 B per in-window `event_count` event; `value_count` with distinct strings costs ~92 B per event and drops to 63 Kelem/s at 1,800 distinct values per window because the distinct count is recomputed per event), and a three-mode comparison on identical load (identical memory and throughput).
+- **Documentation**: results recorded in `BENCHMARKS.md` (new Window Modes and Window-Mode Memory Stress sections plus Key Observations); the Performance Tuning guide's correlation-memory section now documents what the cap does and does not bound, per-event state costs by correlation type, the `value_count` distinct-count hot spot, and the cardinality-flood eviction caveat — and fixes a long-standing inaccuracy (the `max_state_entries` cap is global across all correlation rules, not per rule). The streaming-detection guide links the window-mode semantics to the measured numbers, and the developer testing guide documents the non-Criterion bench target.
+
 ## [0.15.0] - 2026-06-11
 
 **TL;DR**

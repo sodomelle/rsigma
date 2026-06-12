@@ -189,6 +189,12 @@ cargo bench -p rsigma-parser -- parse
 cargo bench -p rsigma-runtime -- runtime_throughput
 ```
 
+One bench target is not a Criterion suite: `correlation_memory` installs a counting global allocator and reports peak/settled heap for correlation window-state stress scenarios (high-cardinality group keys, long-lived chatty sessions), which Criterion cannot measure. It prints an aligned table and finishes in about half a minute:
+
+```bash
+cargo bench -p rsigma-eval --bench correlation_memory
+```
+
 Benchmarks are not gated in CI. The numbers in [Benchmarks](../benchmarks.md) come from a manual run on the development workstation; if a PR makes a hot-path change, attach a before/after Criterion summary in the PR description.
 
 ## Tips
