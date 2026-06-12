@@ -287,6 +287,19 @@ transformations:
         category: registry_event
         product: windows
 
+  - id: fibratus_registry_event
+    type: add_condition
+    # Put the event-name discriminator first so Fibratus's
+    # left-to-right evaluation short-circuits on the cheapest, most
+    # selective predicate before the rule body.
+    prepend: true
+    conditions:
+      evt.category: 'registry'
+    rule_conditions:
+      - type: logsource
+        category: registry_event
+        product: windows
+
   - id: fibratus_registry_set_fields
     type: field_name_mapping
     mapping:
