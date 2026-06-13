@@ -389,6 +389,80 @@ fn convert_to_file_output() {
     assert_snapshot!(content, @r#"SELECT * FROM security_events WHERE "CommandLine" ILIKE '%whoami%'"#);
 }
 
+#[test]
+fn convert_split_writes_one_file_per_rule() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("rule_a.yml"), SIMPLE_DETECTION).unwrap();
+    let second_rule = r#"
+title: Detect Ipconfig
+id: 00000000-0000-0000-0000-000000000101
+status: test
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        CommandLine|contains: 'ipconfig'
+    condition: selection
+level: low
+"#;
+    std::fs::write(dir.path().join("rule_b.yml"), second_rule).unwrap();
+
+    let out_dir = TempDir::new().unwrap();
+    rsigma()
+        .args([
+            "backend",
+            "convert",
+            dir.path().to_str().unwrap(),
+            "--target",
+            "fibratus",
+            "-p",
+            "fibratus_windows",
+            "--output",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let whoami = std::fs::read_to_string(out_dir.path().join("detect_whoami.yml")).unwrap();
+    assert!(whoami.starts_with("name: Detect Whoami\n"));
+    assert!(whoami.contains("ps.cmdline icontains 'whoami'"));
+    assert!(!whoami.contains("ipconfig"));
+
+    let ipconfig = std::fs::read_to_string(out_dir.path().join("detect_ipconfig.yml")).unwrap();
+    assert!(ipconfig.starts_with("name: Detect Ipconfig\n"));
+    assert!(ipconfig.contains("ps.cmdline icontains 'ipconfig'"));
+    assert!(!ipconfig.contains("whoami"));
+}
+
+#[test]
+fn convert_split_creates_directory_from_trailing_separator() {
+    let rule = temp_file(".yml", SIMPLE_DETECTION);
+    let parent = TempDir::new().unwrap();
+    // A path with a trailing separator that does not exist yet is treated as a
+    // directory and created.
+    let out_dir = parent.path().join("Rules");
+    let mut out_arg = out_dir.to_str().unwrap().to_string();
+    out_arg.push(std::path::MAIN_SEPARATOR);
+
+    rsigma()
+        .args([
+            "backend",
+            "convert",
+            rule.path().to_str().unwrap(),
+            "--target",
+            "fibratus",
+            "-p",
+            "fibratus_windows",
+            "--output",
+            &out_arg,
+        ])
+        .assert()
+        .success();
+
+    assert!(out_dir.join("detect_whoami.yml").is_file());
+}
+
 // ---------------------------------------------------------------------------
 // list-targets / list-formats
 // ---------------------------------------------------------------------------

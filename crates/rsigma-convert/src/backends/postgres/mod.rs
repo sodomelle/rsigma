@@ -594,6 +594,10 @@ impl Backend for PostgresBackend {
         false
     }
 
+    fn output_file_extension(&self, _output_format: &str) -> &str {
+        "sql"
+    }
+
     // --- Detection rule conversion ---
 
     fn convert_rule(

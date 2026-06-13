@@ -309,6 +309,9 @@ rsigma backend convert rules/ -t lynxdb
 # Fibratus rule YAML for Windows EDR sensors
 rsigma backend convert rules/windows/ -t fibratus -p fibratus_windows
 
+# Write one rule file per rule into a directory (drop straight into a Fibratus Rules/ folder)
+rsigma backend convert rules/windows/ -t fibratus -p fibratus_windows -o ./Rules/
+
 # List all fields referenced by a ruleset
 rsigma rule fields -r rules/
 

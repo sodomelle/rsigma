@@ -347,6 +347,12 @@ rsigma backend convert rules/windows/process_creation/ -t fibratus -p fibratus_w
 
 Two output formats: `default` (also aliased as `yaml`/`rule`) emits a complete YAML rule document per Sigma rule with the `name`/`id`/`description`/`labels`/`condition`/`min-engine-version`/`action` envelope, with `---` separators when multiple rules are converted at once. `expr` strips the envelope and emits only the bare filter expression for piping into ad-hoc Fibratus commands.
 
+Because Fibratus loads one rule per file from its `Rules/` directory, point `--output` at a directory to get a separate `<title-slug>.yml` file per rule instead of one combined stream, ready to drop straight into the sensor:
+
+```bash
+rsigma backend convert rules/windows/ -t fibratus -p fibratus_windows -o ./Rules/
+```
+
 Backend options (`-O key=value`):
 
 ```bash
@@ -404,6 +410,12 @@ rsigma backend convert rules/ -t postgres -f view \
     --skip-unsupported \
     -o /var/lib/rsigma/sql/views.sql
 psql -f /var/lib/rsigma/sql/views.sql
+```
+
+When `-o` names a directory (an existing directory, or a path ending in a separator that is created on demand) the converter writes one file per rule into it instead of a single combined file. Each file is named after a snake_case slug of the rule title and gets the backend's native extension (`.yml` for Fibratus, `.sql` for PostgreSQL). This is the easiest way to populate a sensor's rule directory, such as a Fibratus `Rules/` folder:
+
+```bash
+rsigma backend convert rules/windows/ -t fibratus -p fibratus_windows -o ./Rules/
 ```
 
 ## Workflow: from rules to a Grafana dashboard

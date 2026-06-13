@@ -4,6 +4,14 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
+### `backend convert`: per-rule file output when `--output` is a directory (#205)
+
+`rsigma backend convert` can now write one file per converted rule instead of a single concatenated stream. When `--output` points at a directory (an existing directory, or a path with a trailing separator that is created on demand), each rule is written to its own file named after a snake_case slug of the rule title, with the backend's native extension. This was prompted by Fibratus rule-deployment ergonomics: the engine loads one YAML rule per file from its `Rules/` directory, so the split output drops straight in without hand-separating the `---`-joined stream.
+
+- **Naming.** File stems are a slug of the rule title (`Detect Whoami` becomes `detect_whoami`), falling back to the rule id and then a `rule` literal when the title slugifies to nothing. Colliding names get a numeric suffix (`same.yml`, `same_2.yml`) so two rules never overwrite each other. A rule that converts to several documents (for example a `temporal` correlation expanded with `-O temporal_permute=true`) keeps them together in its one file, finalized through the backend so the format-aware separators land inside.
+- **Extensions.** A new `Backend::output_file_extension` hook picks the per-rule extension: `yml` for the Fibratus YAML envelope (`txt` for its bare-expression `expr` format), `sql` for PostgreSQL, and `txt` by default. Single-file and stdout output are unchanged.
+- **Docs.** The Fibratus backend reference, the rule-conversion guide, and the README document the directory-output workflow (`rsigma backend convert rules/ -t fibratus -p fibratus_windows -o ./Rules/`).
+
 ### `rstix`: Phase 2 slice 1 — model skeleton and common properties
 
 Phase 2 (Data Model + Serialization) begins with slice 1 of ~7. This slice is not releasable on its own.

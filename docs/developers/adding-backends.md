@@ -106,6 +106,8 @@ impl Backend for SplunkBackend {
 }
 ```
 
+Optional: override `output_file_extension` so the per-rule files `rsigma backend convert` writes when `--output` is a directory get the extension your target loader expects (`"sql"`, `"yml"`, ...). It defaults to `"txt"` and takes the output format so a backend can vary it per format.
+
 Step 4: re-export from `lib.rs` so embedders can use the backend type directly.
 
 ```rust

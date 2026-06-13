@@ -150,6 +150,16 @@ Filter expression only, no YAML envelope. Useful for piping into ad-hoc Fibratus
 spawn_process and ps.exe iendswith '\\cmd.exe' and ps.parent.exe iendswith '\\explorer.exe' and ps.cmdline icontains 'whoami'
 ```
 
+## One file per rule
+
+Fibratus loads one YAML rule per file from its `Rules/` directory, so the backend can write a separate file per converted rule instead of a single `---`-separated stream. This happens automatically when `--output` points at a directory: an existing directory, or a path with a trailing separator (which is created on demand). Each rule lands in `<title-slug>.yml`, ready to drop straight into the sensor:
+
+```sh
+rsigma backend convert rules/windows/ -t fibratus -p fibratus_windows -o ./Rules/
+```
+
+File stems are a snake_case slug of the rule title (`Detect Whoami` becomes `detect_whoami.yml`), matching the upstream rules-library naming style; the rule id and then a `rule` literal are fallbacks when a title slugifies to nothing, and colliding names get a numeric suffix (`same.yml`, `same_2.yml`) so no rule overwrites another. A rule that converts to several documents (a `temporal` correlation expanded with `-O temporal_permute=true`, for example) keeps them together in its one file. Without a directory `--output`, the behavior is unchanged: the whole stream goes to stdout or to the single file you name.
+
 ## Correlation rules
 
 Fibratus 1.10+ uses an inline DSL inside `condition:` for stateful sequences; the backend lowers Sigma correlation rules to that DSL. Coverage matrix:

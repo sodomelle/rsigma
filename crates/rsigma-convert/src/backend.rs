@@ -240,6 +240,19 @@ pub trait Backend: Send + Sync {
 
     fn finalize_output(&self, queries: Vec<String>, output_format: &str) -> Result<String>;
 
+    /// File extension (no leading dot) for per-rule output files when
+    /// `rsigma backend convert` writes one file per rule into a directory.
+    ///
+    /// The default is `txt`; backends override it so the split files land
+    /// with the extension their target loader expects (`sql` for
+    /// PostgreSQL, `yml` for Fibratus rule YAML). The `output_format`
+    /// argument lets a backend pick a different extension per format (e.g.
+    /// Fibratus emits `.txt` for the bare-expression `expr` format and
+    /// `.yml` for the YAML rule envelope).
+    fn output_file_extension(&self, _output_format: &str) -> &str {
+        "txt"
+    }
+
     // --- Correlation rule conversion (optional) ---
 
     fn supports_correlation(&self) -> bool {

@@ -834,6 +834,16 @@ impl Backend for FibratusBackend {
         }
     }
 
+    fn output_file_extension(&self, output_format: &str) -> &str {
+        // The YAML envelope formats drop into a Fibratus `Rules/` directory
+        // as `.yml` files the loader picks up directly; the bare-expression
+        // `expr` format is plain text with no envelope.
+        match output_format {
+            "expr" => "txt",
+            _ => "yml",
+        }
+    }
+
     fn finalize_output(&self, queries: Vec<String>, output_format: &str) -> Result<String> {
         match output_format {
             "expr" => Ok(queries.join("\n")),
