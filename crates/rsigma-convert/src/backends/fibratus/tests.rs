@@ -874,7 +874,7 @@ detection:
 }
 
 #[test]
-fn pipeline_file_event_excludes_open_disposition() {
+fn pipeline_routes_file_event_to_create_file_macro() {
     use rsigma_eval::pipeline::{apply_pipelines_with_state, builtin::resolve_builtin};
 
     let yaml = r#"
@@ -889,24 +889,126 @@ detection:
 "#;
     let mut collection = rsigma_parser::parse_sigma_yaml(yaml).unwrap();
     let pipeline = resolve_builtin("fibratus_windows").unwrap().unwrap();
+    let rule = &mut collection.rules[0];
+    let state = apply_pipelines_with_state(&[pipeline], rule).unwrap();
+
+    // Sigma file_event is file creation: the `CreateFile` + not-`OPEN` +
+    // `Success` discriminator triple is injected first, in macro order, so
+    // the recognizer collapses it to the `create_file` macro (the OPEN
+    // disposition is excluded so it does not fire on plain file access).
+    let backend = FibratusBackend::new();
+    let q = backend.convert_rule(rule, "expr", &state).unwrap();
+    let out = &q[0];
+    assert!(out.starts_with("create_file"), "got: {out}");
+    assert!(
+        out.contains(r"file.path iendswith '\\evil.exe'"),
+        "got: {out}"
+    );
+
+    // With `-O use_macros=false` the recognizer is bypassed and the raw
+    // discriminator triple is emitted, leading with the event name and
+    // carrying the negated-equality disposition guard.
+    let raw_backend =
+        FibratusBackend::from_options(&[("use_macros".to_string(), "false".to_string())].into());
+    let raw = raw_backend.convert_rule(rule, "expr", &state).unwrap();
+    let raw_out = &raw[0];
+    assert!(
+        raw_out.starts_with("evt.name = 'CreateFile'"),
+        "got: {raw_out}"
+    );
+    assert!(
+        raw_out.contains("not (file.operation ~= 'OPEN')"),
+        "expected OPEN disposition excluded, got: {raw_out}",
+    );
+    assert!(
+        raw_out.contains("file.status ~= 'Success'"),
+        "expected success status guard, got: {raw_out}",
+    );
+}
+
+#[test]
+fn pipeline_routes_file_access_to_open_file_macro() {
+    use rsigma_eval::pipeline::{apply_pipelines_with_state, builtin::resolve_builtin};
+
+    let yaml = r#"
+title: Crypto wallet access
+logsource:
+  category: file_access
+  product: windows
+detection:
+  selection:
+    FileName|contains: '\AppData\Roaming\Ethereum\keystore\'
+  condition: selection
+"#;
+    let mut collection = rsigma_parser::parse_sigma_yaml(yaml).unwrap();
+    let pipeline = resolve_builtin("fibratus_windows").unwrap().unwrap();
     let backend = FibratusBackend::new();
     let rule = &mut collection.rules[0];
     let state = apply_pipelines_with_state(&[pipeline], rule).unwrap();
     let q = backend.convert_rule(rule, "expr", &state).unwrap();
 
+    // Sigma file_access is a file open: the `CreateFile` + `OPEN` +
+    // `Success` discriminator triple is injected first, in macro order, so
+    // the recognizer collapses it to the `open_file` macro. `FileName`
+    // renames to `file.path` and `Image` (absent here) would rename to
+    // `ps.exe`.
     let out = &q[0];
-    // Sigma file_event is file creation: the `CreateFile` event is led
-    // with, the path is renamed, and the OPEN disposition is excluded so
-    // it does not fire on plain file access (the `create_file` macro
-    // semantics).
-    assert!(out.starts_with("evt.name = 'CreateFile'"), "got: {out}");
+    assert!(out.starts_with("open_file"), "got: {out}");
     assert!(
-        out.contains(r"file.path iendswith '\\evil.exe'"),
-        "got: {out}"
+        out.contains(r"file.path icontains '\\AppData\\Roaming\\Ethereum\\keystore\\'"),
+        "got: {out}",
+    );
+}
+
+#[test]
+fn pipeline_routes_create_remote_thread_to_macro() {
+    use rsigma_eval::pipeline::{apply_pipelines_with_state, builtin::resolve_builtin};
+
+    let yaml = r#"
+title: Remote Thread Created In KeePass.EXE
+logsource:
+  product: windows
+  category: create_remote_thread
+detection:
+  selection:
+    TargetImage|endswith: '\KeePass.exe'
+  condition: selection
+"#;
+    let mut collection = rsigma_parser::parse_sigma_yaml(yaml).unwrap();
+    let pipeline = resolve_builtin("fibratus_windows").unwrap().unwrap();
+    let rule = &mut collection.rules[0];
+    let state = apply_pipelines_with_state(&[pipeline], rule).unwrap();
+
+    // The CreateThread event plus the two cross-process guards collapse to
+    // the `create_remote_thread` macro (not the bare `create_thread`).
+    // `TargetImage` renames to the `evt.arg[exe]` event argument.
+    let backend = FibratusBackend::new();
+    let q = backend.convert_rule(rule, "expr", &state).unwrap();
+    let out = &q[0];
+    assert!(out.starts_with("create_remote_thread"), "got: {out}");
+    assert!(
+        !out.contains("create_thread and"),
+        "must not degrade to the bare create_thread macro, got: {out}",
     );
     assert!(
-        out.contains("not (file.operation ~= 'OPEN')"),
-        "expected OPEN disposition excluded, got: {out}",
+        out.contains(r"evt.arg[exe] iendswith '\\KeePass.exe'"),
+        "got: {out}",
+    );
+
+    // With macros disabled the raw discriminator is emitted: the event
+    // name, the System-process guard, and the cross-process field guard.
+    let raw_backend =
+        FibratusBackend::from_options(&[("use_macros".to_string(), "false".to_string())].into());
+    let raw = raw_backend.convert_rule(rule, "expr", &state).unwrap();
+    let raw_out = &raw[0];
+    assert!(
+        raw_out.starts_with("evt.name = 'CreateThread'"),
+        "got: {raw_out}",
+    );
+    assert!(raw_out.contains("not (evt.pid = 4)"), "got: {raw_out}");
+    assert!(
+        raw_out.contains("not (evt.pid = thread.pid)"),
+        "got: {raw_out}",
     );
 }
 

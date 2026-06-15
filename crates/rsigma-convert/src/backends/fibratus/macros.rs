@@ -10,11 +10,15 @@
 //! (`spawn_process and ps.exe iendswith '\\cmd.exe'` rather than
 //! `evt.name = 'CreateProcess' and ps.exe iendswith '\\cmd.exe'`).
 //!
-//! Both operator forms are accepted per clause at recognition time so a
+//! Every rendered form of a clause is accepted at recognition time so a
 //! macro matches whether a clause was emitted with the case-sensitive
 //! string-equality operator (`field = 'literal'`, what `evt.name` and
-//! `-O case_sensitive=true` produce) or the case-insensitive one
-//! (`field ~= 'literal'`, the default for non-`evt.name` literals).
+//! `-O case_sensitive=true` produce), the case-insensitive one
+//! (`field ~= 'literal'`, the default for non-`evt.name` literals), the
+//! literal inequality (`field != value`), or the De Morgan negated
+//! equality the `add_condition` pipeline emits for an inequality clause
+//! (`not (field ~= 'literal')`), which is how a disposition guard such as
+//! `create_file`'s `file.operation != 'OPEN'` reaches the recognizer.
 
 use std::sync::LazyLock;
 
@@ -50,6 +54,18 @@ pub const EXPRESSION_MACROS: &[(&str, &str)] = &[
     ("query_dns", "evt.name = 'QueryDns'"),
     ("reply_dns", "evt.name = 'ReplyDns'"),
     // Multi-clause macros, matched as contiguous clause runs.
+    //
+    // `create_remote_thread` is `create_thread` plus the cross-process
+    // guards (`evt.pid != 4` excludes the System process; `evt.pid !=
+    // thread.pid` requires the target thread to live in a different
+    // process). Listed before the bare `create_thread` is irrelevant to
+    // matching (the recognizer tries longest clause runs first), but its
+    // inequality clauses are why the pipeline injects them as negated
+    // equalities.
+    (
+        "create_remote_thread",
+        "evt.name = 'CreateThread' and evt.pid != 4 and evt.pid != thread.pid",
+    ),
     (
         "open_file",
         "evt.name = 'CreateFile' and file.operation = 'OPEN' and file.status = 'Success'",
@@ -88,30 +104,41 @@ pub const EXPRESSION_MACROS: &[(&str, &str)] = &[
     ),
 ];
 
-/// One macro's pre-rendered clause sequences in both operator forms.
+/// One macro's pre-rendered clause sequence, each clause carrying every
+/// rendered form the backend may emit for it.
 ///
-/// Stored as `(macro_name, default_form_clauses, cased_form_clauses)`:
-/// `default_form_clauses` is what the backend emits with the default
-/// case-insensitive string equality (`field ~= 'literal'`);
-/// `cased_form_clauses` is what the backend emits for exact equality
-/// (`field = 'literal'`, used for `evt.name` and `-O case_sensitive=true`).
-/// Each clause is matched independently against either form, so a macro
-/// whose `evt.name` clause renders with `=` while a sibling status clause
-/// renders with `~=` still matches.
-type MacroClauses = (&'static str, Vec<String>, Vec<String>);
+/// Stored as `(macro_name, per_clause_forms)`. A single upstream clause
+/// can surface in several rendered shapes depending on how the conversion
+/// ran, so each clause keeps the set of all acceptable forms:
+///
+/// - case-sensitive exact equality (`field = 'literal'`, used for
+///   `evt.name` and `-O case_sensitive=true`);
+/// - case-insensitive string equality (`field ~= 'literal'`, the default
+///   for a non-`evt.name` literal);
+/// - literal inequality (`field != value`); and
+/// - the De Morgan negated equality the `add_condition` pipeline emits for
+///   an inequality macro clause (`not (field = value)`, or
+///   `not (field ~= 'literal')` for the case-insensitive default).
+///
+/// Each clause is matched independently against its own form set, so a
+/// macro whose `evt.name` clause renders with `=` while a sibling status
+/// clause renders with `~=` (or a disposition clause renders as a negated
+/// equality) still matches.
+type MacroClauses = (&'static str, Vec<Vec<String>>);
 
 /// Pre-rendered macro clauses, derived from [`EXPRESSION_MACROS`] at
-/// first access via [`LazyLock`]. The recognizer compares
-/// clause-by-clause against either form, so a rule that mixes cased
-/// and default operators across separate macros still recognizes each
-/// one independently.
+/// first access via [`LazyLock`]. The recognizer compares clause-by-clause
+/// against each clause's accepted-form set, so a rule that mixes operator
+/// forms across separate macros still recognizes each one independently.
 static MACRO_CLAUSES: LazyLock<Vec<MacroClauses>> = LazyLock::new(|| {
     EXPRESSION_MACROS
         .iter()
         .map(|(name, src)| {
-            let cased: Vec<String> = split_clauses(src).into_iter().map(str::to_string).collect();
-            let default: Vec<String> = cased.iter().map(|c| to_ci_eq(c)).collect();
-            (*name, default, cased)
+            let forms: Vec<Vec<String>> = split_clauses(src)
+                .into_iter()
+                .map(accepted_clause_forms)
+                .collect();
+            (*name, forms)
         })
         .collect()
 });
@@ -161,13 +188,13 @@ pub fn recognize(condition: &str) -> String {
     let mut i = 0;
     while i < clauses.len() {
         let mut matched = None;
-        for (name, default_clauses, cased_clauses) in &macros {
-            let len = default_clauses.len();
+        for (name, clause_forms) in &macros {
+            let len = clause_forms.len();
             if i + len > clauses.len() {
                 continue;
             }
             let slice = &clauses[i..i + len];
-            if clauses_match(slice, default_clauses, cased_clauses) {
+            if clauses_match(slice, clause_forms) {
                 matched = Some((*name, len));
                 break;
             }
@@ -191,23 +218,23 @@ fn matches_any_macro(clause: &str) -> bool {
     let slice = std::slice::from_ref(&binding);
     MACRO_CLAUSES
         .iter()
-        .any(|(_, def, cased)| clauses_match(slice, def, cased))
+        .any(|(_, forms)| clauses_match(slice, forms))
 }
 
 /// Whether `slice` matches a macro's clause sequence, comparing each
-/// clause against either the default (`~=`) or cased (`=`) form
-/// independently. Per-clause matching means a macro whose `evt.name`
-/// clause renders with `=` and a status clause renders with `~=` still
-/// matches without needing a uniform operator across the whole run.
-fn clauses_match(slice: &[String], default: &[String], cased: &[String]) -> bool {
-    if slice.len() != default.len() || slice.len() != cased.len() {
+/// clause against its own accepted-form set independently. Per-clause
+/// matching means a macro whose `evt.name` clause renders with `=`, a
+/// status clause renders with `~=`, and a disposition clause renders as a
+/// negated equality still matches without a uniform operator across the
+/// whole run.
+fn clauses_match(slice: &[String], clause_forms: &[Vec<String>]) -> bool {
+    if slice.len() != clause_forms.len() {
         return false;
     }
     slice
         .iter()
-        .zip(default)
-        .zip(cased)
-        .all(|((got, d), c)| got.trim() == d.trim() || got.trim() == c.trim())
+        .zip(clause_forms)
+        .all(|(got, accepted)| accepted.iter().any(|form| got.trim() == form))
 }
 
 // =============================================================================
@@ -313,6 +340,69 @@ fn split_clauses(src: &str) -> Vec<&str> {
         out.push(tail);
     }
     out
+}
+
+/// All rendered forms the backend may emit for one upstream macro clause.
+///
+/// Always includes the verbatim upstream form. For an equality clause
+/// (`field = 'literal'`) it adds the case-insensitive default
+/// (`field ~= 'literal'`). For an inequality clause (`field != value`) it
+/// adds the De Morgan negated equalities the `add_condition` pipeline
+/// produces (`not (field = value)`, plus `not (field ~= 'literal')` when
+/// the right-hand side is a quoted literal), so a disposition guard the
+/// pipeline injects as a negated equality recognizes against the macro's
+/// `!=` clause.
+fn accepted_clause_forms(clause: &str) -> Vec<String> {
+    let clause = clause.trim();
+    let mut forms = vec![clause.to_string()];
+    let ci = to_ci_eq(clause);
+    if ci != clause {
+        forms.push(ci);
+    }
+    if let Some((lhs, rhs)) = split_top_level_neq(clause) {
+        let lhs = lhs.trim();
+        let rhs = rhs.trim();
+        forms.push(format!("not ({lhs} = {rhs})"));
+        if rhs.starts_with('\'') {
+            forms.push(format!("not ({lhs} ~= {rhs})"));
+        }
+    }
+    forms
+}
+
+/// Split a clause on its first top-level ` != ` operator, returning
+/// `(lhs, rhs)`. Respects parenthesis and single-quoted-string nesting so
+/// a `!=` inside a literal or a group is not treated as the operator.
+fn split_top_level_neq(clause: &str) -> Option<(&str, &str)> {
+    let bytes = clause.as_bytes();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == b'\'' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => in_str = true,
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && matches_token(bytes, i, b" != ") {
+            return Some((&clause[..i], &clause[i + b" != ".len()..]));
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Convert a cased-form clause (`field = 'literal'`) into the
@@ -472,6 +562,23 @@ mod tests {
             "evt.name = 'CreateFile' and file.operation ~= 'OPEN' and file.status ~= 'Success'",
         );
         assert_eq!(out2, "open_file");
+    }
+
+    #[test]
+    fn recognize_create_file_from_negated_equality_disposition() {
+        // The `add_condition` pipeline injects the OPEN-disposition guard
+        // as a negated equality (`not (file.operation ~= 'OPEN')`), the
+        // De Morgan equivalent of the macro's `file.operation != 'OPEN'`.
+        // The recognizer accepts that form and still folds the run.
+        let out = recognize(
+            "evt.name = 'CreateFile' and not (file.operation ~= 'OPEN') and file.status ~= 'Success'",
+        );
+        assert_eq!(out, "create_file");
+        // And it keeps trailing rule-body clauses verbatim.
+        let out2 = recognize(
+            "evt.name = 'CreateFile' and not (file.operation ~= 'OPEN') and file.status ~= 'Success' and file.path iendswith '.rdp'",
+        );
+        assert_eq!(out2, "create_file and file.path iendswith '.rdp'");
     }
 
     #[test]

@@ -115,10 +115,17 @@ transformations:
   # Sigma's `file_event` is a file *creation* event. Fibratus's
   # `CreateFile` kernel event covers both opens and creations, so the
   # creation case is the `create_file` macro: a `CreateFile` event whose
-  # disposition is anything other than `OPEN`. The event-name predicate
-  # is prepended and the `file.operation != 'OPEN'` guard is added as a
-  # negated `OPEN` comparison so a Sigma `file_event` rule does not also
-  # fire on plain file opens (which belong to a separate access event).
+  # disposition is anything other than `OPEN` and whose status is success.
+  # The three discriminator clauses are injected with `prepend: true` in
+  # reverse order so the rendered condition leads with the macro's exact
+  # clause sequence (`evt.name = 'CreateFile' and file.operation != 'OPEN'
+  # and file.status = 'Success'`), which the recognizer collapses to
+  # `create_file`. The disposition guard is a negated equality
+  # (`not (file.operation = 'OPEN')`), the De Morgan equivalent the
+  # recognizer accepts for the macro's `!=` clause. Because each prepend
+  # wraps as `new AND existing`, the step applied last ends up first;
+  # listing them status -> operation -> event-name yields
+  # event-name -> operation -> status left to right.
   - id: fibratus_file_event_fields
     type: field_name_mapping
     mapping:
@@ -131,14 +138,11 @@ transformations:
         category: file_event
         product: windows
 
-  - id: fibratus_file_event_condition
+  - id: fibratus_file_event_status
     type: add_condition
-    # Put the event-name discriminator first so Fibratus's
-    # left-to-right evaluation short-circuits on the cheapest, most
-    # selective predicate before the rule body.
     prepend: true
     conditions:
-      evt.name: CreateFile
+      file.status: Success
     rule_conditions:
       - type: logsource
         category: file_event
@@ -149,11 +153,77 @@ transformations:
     # Exclude the OPEN disposition so this matches file creation
     # (the `create_file` macro), not file access.
     negated: true
+    prepend: true
     conditions:
       file.operation: OPEN
     rule_conditions:
       - type: logsource
         category: file_event
+        product: windows
+
+  - id: fibratus_file_event_event
+    type: add_condition
+    prepend: true
+    conditions:
+      evt.name: CreateFile
+    rule_conditions:
+      - type: logsource
+        category: file_event
+        product: windows
+
+  # --- File access (file open) ---
+  #
+  # Sigma's `file_access` is a file *open* event (Microsoft-Windows-Kernel-File
+  # ETW provider). Fibratus's `CreateFile` kernel event covers both opens and
+  # creations, so the access case is the `open_file` macro: a `CreateFile`
+  # event whose disposition is `OPEN` and whose status is `Success`. The three
+  # discriminator clauses are injected with `prepend: true` in reverse order so
+  # the rendered condition leads with the macro's exact clause sequence
+  # (`evt.name = 'CreateFile' and file.operation = 'OPEN' and file.status =
+  # 'Success'`), which the backend's macro recognizer collapses to `open_file`.
+  # Because each `add_condition prepend` wraps as `new AND existing`, the step
+  # applied last ends up first; listing them status -> operation -> event-name
+  # therefore yields event-name -> operation -> status left to right.
+  - id: fibratus_file_access_fields
+    type: field_name_mapping
+    mapping:
+      FileName: file.path
+      Image: ps.exe
+      ProcessId: ps.pid
+      User: ps.username
+    rule_conditions:
+      - type: logsource
+        category: file_access
+        product: windows
+
+  - id: fibratus_file_access_status
+    type: add_condition
+    prepend: true
+    conditions:
+      file.status: Success
+    rule_conditions:
+      - type: logsource
+        category: file_access
+        product: windows
+
+  - id: fibratus_file_access_operation
+    type: add_condition
+    prepend: true
+    conditions:
+      file.operation: OPEN
+    rule_conditions:
+      - type: logsource
+        category: file_access
+        product: windows
+
+  - id: fibratus_file_access_event
+    type: add_condition
+    prepend: true
+    conditions:
+      evt.name: CreateFile
+    rule_conditions:
+      - type: logsource
+        category: file_access
         product: windows
 
   # --- File delete ---
@@ -382,12 +452,23 @@ transformations:
 
   # --- Create remote thread ---
   #
+  # Sigma's `create_remote_thread` maps to the Fibratus `create_remote_thread`
+  # macro: a `CreateThread` event in a *different* process than the caller.
+  # The macro is `evt.name = 'CreateThread' and evt.pid != 4 and
+  # evt.pid != thread.pid` (the `evt.pid != 4` guard excludes the System
+  # process; `evt.pid != thread.pid` requires the target thread to live in
+  # another process). The two inequality guards are injected as negated
+  # equalities (`not (evt.pid = 4)`, `not (evt.pid = thread.pid)`), the
+  # De Morgan forms the recognizer folds into the macro's `!=` clauses; the
+  # cross-process guard uses `field_refs` so `thread.pid` is compared as a
+  # field, not a string literal. They are prepended in reverse order so the
+  # rendered run leads with the macro's exact clause sequence
+  # (event-name -> evt.pid!=4 -> evt.pid!=thread.pid).
+  #
   # Fibratus does not expose a `thread.image` field for the target
-  # process's executable on a CreateThread event, only `thread.pid`
-  # (the cross-process pointer that `create_remote_thread` macro
-  # already uses: `evt.pid != thread.pid`). Sigma rules that
-  # reference `TargetImage` will fail conversion with an unsupported
-  # field rather than emit a renamed field Fibratus does not know.
+  # process's executable on a CreateThread event, only `thread.pid`. Sigma
+  # rules that reference `TargetImage` will fail conversion with an
+  # unsupported field rather than emit a renamed field Fibratus does not know.
   - id: fibratus_create_remote_thread_fields
     type: field_name_mapping
     mapping:
@@ -398,6 +479,30 @@ transformations:
       StartAddress: thread.start_address
       StartModule: thread.start_address.module
       StartFunction: thread.start_address.symbol
+    rule_conditions:
+      - type: logsource
+        category: create_remote_thread
+        product: windows
+
+  - id: fibratus_create_remote_thread_not_self
+    type: add_condition
+    # Cross-process guard: the target thread must live in another process.
+    negated: true
+    prepend: true
+    field_refs:
+      evt.pid: thread.pid
+    rule_conditions:
+      - type: logsource
+        category: create_remote_thread
+        product: windows
+
+  - id: fibratus_create_remote_thread_not_system
+    type: add_condition
+    # Exclude the System process (pid 4), matching the upstream macro.
+    negated: true
+    prepend: true
+    conditions:
+      evt.pid: 4
     rule_conditions:
       - type: logsource
         category: create_remote_thread
