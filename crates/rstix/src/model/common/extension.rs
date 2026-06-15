@@ -130,3 +130,27 @@ impl ExtensionMap {
         self.0.insert(id.into(), entry)
     }
 }
+
+#[cfg(all(test, feature = "serde"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_type_strings_round_trip() {
+        for (variant, text) in [
+            (ExtensionType::NewSdo, "\"new-sdo\""),
+            (ExtensionType::NewSro, "\"new-sro\""),
+            (ExtensionType::NewSco, "\"new-sco\""),
+            (ExtensionType::PropertyExtension, "\"property-extension\""),
+            (
+                ExtensionType::ToplevelPropertyExtension,
+                "\"toplevel-property-extension\"",
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), text);
+            let decoded: ExtensionType = serde_json::from_str(text).unwrap();
+            assert_eq!(decoded, variant);
+        }
+        assert!(serde_json::from_str::<ExtensionType>("\"made-up\"").is_err());
+    }
+}

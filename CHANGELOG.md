@@ -2,6 +2,17 @@
 
 All notable changes to RSigma are documented in this file. Each entry corresponds to a [GitHub Release](https://github.com/timescale/rsigma/releases).
 
+## [Unreleased]
+
+### `rstix`: Phase 2 — STIX meta objects
+
+Phase 2 adds STIX meta objects (not releasable on its own until `StixObject` dispatch and `Bundle` parsing land).
+
+- **`model::meta`:** `MarkingDefinition` (STIX §7.2.1 optional common properties — `created_by_ref`, `external_references`, `object_marking_refs`, `granular_markings`; legacy TLP 1.x and current TLP 2.0 encodings; `IS_NON_VERSIONABLE` / `is_non_versionable()`; nine TLP UUID constants), `ExtensionDefinition` (`created_by_ref` required per §7.2.2), `LanguageContent` (`contents` as nested `BTreeMap` for stable JSON key order), and the `MetaObject` enum (`#[non_exhaustive]`).
+- **Deserialize:** each meta type validates JSON `"type"` against `TYPE_NAME` in a single serde pass (`ModelError::UnexpectedObjectType`); no intermediate `serde_json::Value` parse.
+- **Tests:** `roundtrip_strict` for complete types (meta objects, `ExternalReference`, `GranularMarking`, `ExtensionMap`); subset `roundtrip` for `SdoSroCommonProps` / `ScoCommonProps` fixtures that carry unmodeled SDO keys. Fixtures under `tests/fixtures/spec/meta/` include minimal TLP markings, a rich marking-def with common properties, and cross-type reject coverage. Unit pins for all nine TLP ids.
+- **Docs:** STIX object model version vs TLP marking encoding in `crates/rstix/README.md` and `docs/library/rstix.md`.
+
 ## [0.16.0] - 2026-06-15
 
 **TL;DR**
@@ -67,9 +78,9 @@ Three correctness fixes to the `fibratus_windows` pipeline shipped in #191, foun
 - **Thread events.** `create_remote_thread` maps `TargetImage` -> `evt.arg[exe]`, so a rule that scopes the injected-into process converts rather than dropping the field.
 - **Registry event scoping.** The `registry_event` logsource category now prepends an `evt.category = 'registry'` discriminator as its first condition, the same treatment the other categories already get. Fibratus rejects a rule at load time when it has no event-type scoping by name or category, so without this the converted `registry_event` rules would not load.
 
-### `rstix`: Phase 2 slice 1 — model skeleton and common properties (#201)
+### `rstix`: Phase 2 — model skeleton and common properties (#201)
 
-Phase 2 (Data Model + Serialization) begins with slice 1 of ~7. This slice is not releasable on its own.
+Phase 2 (Data Model + Serialization) adds the model skeleton and common property containers. This work is not releasable on its own.
 
 - **`model` module:** `ModelError` and `model::common` property containers — `SdoSroCommonProps` (required `spec_version`, `created`, `modified`; `confidence` as `Option<Confidence>`), `ScoCommonProps` (SCO-only fields), `ExternalReference` (STIX §2.5.2: non-empty `source_name` plus at least one of `description`, `url`, or `external_id` enforced on construction and deserialization), `GranularMarking` (`marking_ref` XOR `lang`; non-empty `selectors`), and `ExtensionMap` / `ExtensionType`.
 - **Leaf-type serde:** `serde_impls/` for `StixId`, timestamps, and `Confidence`; typed-ID serde in the `define_typed_id!` macro; inline `LanguageTag` serde.

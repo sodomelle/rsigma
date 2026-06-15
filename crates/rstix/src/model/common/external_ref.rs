@@ -120,3 +120,25 @@ impl<'de> serde::Deserialize<'de> for ExternalReference {
         Ok(reference)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ModelError;
+
+    #[test]
+    fn new_rejects_empty_source_name() {
+        assert_eq!(
+            ExternalReference::new("   ", None, None, None).unwrap_err(),
+            ModelError::ExternalReferenceMissingSourceName
+        );
+    }
+
+    #[test]
+    fn new_rejects_source_name_without_detail() {
+        assert_eq!(
+            ExternalReference::new("capec", None, None, None).unwrap_err(),
+            ModelError::ExternalReferenceMissingDetail
+        );
+    }
+}

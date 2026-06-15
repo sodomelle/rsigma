@@ -1,0 +1,13 @@
+{
+  "type": "marking-definition",
+  "spec_version": "2.1",
+  "id": "marking-definition--94868c89-73b8-4b43-b99e-6a4f9d6ded18",
+  "created": "2022-03-11T19:45:00.000Z",
+  "name": "TLP:CLEAR",
+  "extensions": {
+    "extension-definition--60477d8d-78ac-1058-8160-d776f9386f83": {
+      "extension_type": "property-extension",
+      "tlp_2_0": "clear"
+    }
+  }
+}

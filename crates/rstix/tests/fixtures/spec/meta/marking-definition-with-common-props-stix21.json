@@ -1,0 +1,28 @@
+{
+  "type": "marking-definition",
+  "spec_version": "2.1",
+  "id": "marking-definition--a1111111-1111-4111-8111-111111111111",
+  "created": "2017-01-20T00:00:00.000Z",
+  "created_by_ref": "identity--c78cb6e5-0c4b-4611-8297-d1b8b55e40b5",
+  "definition_type": "statement",
+  "definition": {
+    "statement": "Copyright 2017 Example Corp"
+  },
+  "name": "Copyright Statement",
+  "object_marking_refs": [
+    "marking-definition--613f2e26-407d-48c7-9eca-b8e91df99dc9"
+  ],
+  "external_references": [
+    {
+      "source_name": "example",
+      "description": "Example policy reference",
+      "url": "https://example.org/policy"
+    }
+  ],
+  "granular_markings": [
+    {
+      "selectors": ["name"],
+      "marking_ref": "marking-definition--94868c89-73b8-4b43-b99e-6a4f9d6ded18"
+    }
+  ]
+}

@@ -7,9 +7,32 @@ use serde::de::DeserializeOwned;
 
 use super::load_spec_fixture;
 
-/// Load `relative_path` under `tests/fixtures/spec/`, round-trip through JSON, and
+/// Load `relative_path`, round-trip through JSON with **strict** fixture equality, and
 /// return the parsed value.
+///
+/// Use for complete types that must not drop any fixture field on re-serialize.
+pub fn roundtrip_strict<T>(relative_path: &str) -> T
+where
+    T: DeserializeOwned + Serialize + PartialEq + Debug,
+{
+    roundtrip_inner(relative_path, true)
+}
+
+/// Load `relative_path`, round-trip through JSON with **subset** fixture comparison,
+/// and return the parsed value.
+///
+/// Use when the type deliberately ignores extra fixture keys (for example
+/// `SdoSroCommonProps` fixtures that carry SDO-specific fields not modeled yet).
+/// Subset comparison does not catch dropped fixture fields on object fixtures; see
+/// [`assert_reserialized_matches_fixture_subset`].
 pub fn roundtrip<T>(relative_path: &str) -> T
+where
+    T: DeserializeOwned + Serialize + PartialEq + Debug,
+{
+    roundtrip_inner(relative_path, false)
+}
+
+fn roundtrip_inner<T>(relative_path: &str, strict: bool) -> T
 where
     T: DeserializeOwned + Serialize + PartialEq + Debug,
 {
@@ -17,7 +40,14 @@ where
     let original: serde_json::Value = serde_json::from_str(&json).expect("parse fixture");
     let parsed: T = serde_json::from_str(&json).expect("deserialize");
     let reserialized_value = serde_json::to_value(&parsed).expect("serialize to value");
-    assert_reserialized_matches_fixture(&original, &reserialized_value);
+    if strict {
+        assert_eq!(
+            original, reserialized_value,
+            "strict round-trip: re-serialized value must equal fixture ({relative_path})"
+        );
+    } else {
+        assert_reserialized_matches_fixture_subset(&original, &reserialized_value);
+    }
     let reparsed: T = serde_json::from_value(reserialized_value).expect("reparse");
     assert_eq!(parsed, reparsed);
     parsed
@@ -32,15 +62,13 @@ pub fn assert_fixture_rejects<T: DeserializeOwned>(relative_path: &str) {
     );
 }
 
-/// Compare the re-serialized value against the original fixture.
-///
-/// Fixtures for common-property structs may carry SDO-specific keys (`type`,
-/// `name`, …) that the type deliberately ignores today; for those object
-/// fixtures every emitted field must match the fixture, but extra fixture keys
-/// are allowed. Standalone type fixtures (for example `ExternalReference`) use
-/// full value equality. Once concrete SDO/SRO types land in later slices, full
-/// fixture comparison will catch dropped fields for free.
-fn assert_reserialized_matches_fixture(
+/// Subset compare used by [`roundtrip`]: for object fixtures, every emitted field
+/// must match the fixture, but extra fixture keys are allowed; dropped fields are
+/// NOT caught by this object-vs-object arm. Only non-object fixtures use full value
+/// equality. Once concrete SDO/SRO types land in a later Phase 2 milestone, full
+/// fixture comparison will catch dropped fields for free. Prefer [`roundtrip_strict`]
+/// for complete types that must not drop any fixture field today.
+fn assert_reserialized_matches_fixture_subset(
     original: &serde_json::Value,
     reserialized: &serde_json::Value,
 ) {

@@ -4,4 +4,4 @@ mod fixtures;
 mod roundtrip;
 
 pub use fixtures::load_spec_fixture;
-pub use roundtrip::{assert_fixture_rejects, roundtrip};
+pub use roundtrip::{assert_fixture_rejects, roundtrip, roundtrip_strict};
