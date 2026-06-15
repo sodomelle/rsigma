@@ -4,7 +4,7 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
-### `rule backtest`: corpus replay with per-rule expectations (#TBD)
+### `rule backtest`: corpus replay with per-rule expectations (#216)
 
 A new `rsigma rule backtest` subcommand replays an event corpus against a ruleset and diffs the per-rule fire counts against declared expectations, the per-rule fixture harness that `engine eval --fail-on-detection` could not provide (that check is corpus-global and passes when any rule fires).
 
