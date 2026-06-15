@@ -874,7 +874,7 @@ detection:
 }
 
 #[test]
-fn pipeline_file_event_excludes_open_disposition() {
+fn pipeline_routes_file_event_to_create_file_macro() {
     use rsigma_eval::pipeline::{apply_pipelines_with_state, builtin::resolve_builtin};
 
     let yaml = r#"
@@ -889,24 +889,37 @@ detection:
 "#;
     let mut collection = rsigma_parser::parse_sigma_yaml(yaml).unwrap();
     let pipeline = resolve_builtin("fibratus_windows").unwrap().unwrap();
-    let backend = FibratusBackend::new();
     let rule = &mut collection.rules[0];
     let state = apply_pipelines_with_state(&[pipeline], rule).unwrap();
-    let q = backend.convert_rule(rule, "expr", &state).unwrap();
 
+    // Sigma file_event is file creation: the `CreateFile` + not-`OPEN` +
+    // `Success` discriminator triple is injected first, in macro order, so
+    // the recognizer collapses it to the `create_file` macro (the OPEN
+    // disposition is excluded so it does not fire on plain file access).
+    let backend = FibratusBackend::new();
+    let q = backend.convert_rule(rule, "expr", &state).unwrap();
     let out = &q[0];
-    // Sigma file_event is file creation: the `CreateFile` event is led
-    // with, the path is renamed, and the OPEN disposition is excluded so
-    // it does not fire on plain file access (the `create_file` macro
-    // semantics).
-    assert!(out.starts_with("evt.name = 'CreateFile'"), "got: {out}");
+    assert!(out.starts_with("create_file"), "got: {out}");
     assert!(
         out.contains(r"file.path iendswith '\\evil.exe'"),
         "got: {out}"
     );
+
+    // With `-O use_macros=false` the recognizer is bypassed and the raw
+    // discriminator triple is emitted, leading with the event name and
+    // carrying the negated-equality disposition guard.
+    let raw_backend =
+        FibratusBackend::from_options(&[("use_macros".to_string(), "false".to_string())].into());
+    let raw = raw_backend.convert_rule(rule, "expr", &state).unwrap();
+    let raw_out = &raw[0];
+    assert!(raw_out.starts_with("evt.name = 'CreateFile'"), "got: {raw_out}");
     assert!(
-        out.contains("not (file.operation ~= 'OPEN')"),
-        "expected OPEN disposition excluded, got: {out}",
+        raw_out.contains("not (file.operation ~= 'OPEN')"),
+        "expected OPEN disposition excluded, got: {raw_out}",
+    );
+    assert!(
+        raw_out.contains("file.status ~= 'Success'"),
+        "expected success status guard, got: {raw_out}",
     );
 }
 

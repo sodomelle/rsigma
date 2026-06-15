@@ -115,10 +115,17 @@ transformations:
   # Sigma's `file_event` is a file *creation* event. Fibratus's
   # `CreateFile` kernel event covers both opens and creations, so the
   # creation case is the `create_file` macro: a `CreateFile` event whose
-  # disposition is anything other than `OPEN`. The event-name predicate
-  # is prepended and the `file.operation != 'OPEN'` guard is added as a
-  # negated `OPEN` comparison so a Sigma `file_event` rule does not also
-  # fire on plain file opens (which belong to a separate access event).
+  # disposition is anything other than `OPEN` and whose status is success.
+  # The three discriminator clauses are injected with `prepend: true` in
+  # reverse order so the rendered condition leads with the macro's exact
+  # clause sequence (`evt.name = 'CreateFile' and file.operation != 'OPEN'
+  # and file.status = 'Success'`), which the recognizer collapses to
+  # `create_file`. The disposition guard is a negated equality
+  # (`not (file.operation = 'OPEN')`), the De Morgan equivalent the
+  # recognizer accepts for the macro's `!=` clause. Because each prepend
+  # wraps as `new AND existing`, the step applied last ends up first;
+  # listing them status -> operation -> event-name yields
+  # event-name -> operation -> status left to right.
   - id: fibratus_file_event_fields
     type: field_name_mapping
     mapping:
@@ -131,14 +138,11 @@ transformations:
         category: file_event
         product: windows
 
-  - id: fibratus_file_event_condition
+  - id: fibratus_file_event_status
     type: add_condition
-    # Put the event-name discriminator first so Fibratus's
-    # left-to-right evaluation short-circuits on the cheapest, most
-    # selective predicate before the rule body.
     prepend: true
     conditions:
-      evt.name: CreateFile
+      file.status: Success
     rule_conditions:
       - type: logsource
         category: file_event
@@ -149,8 +153,19 @@ transformations:
     # Exclude the OPEN disposition so this matches file creation
     # (the `create_file` macro), not file access.
     negated: true
+    prepend: true
     conditions:
       file.operation: OPEN
+    rule_conditions:
+      - type: logsource
+        category: file_event
+        product: windows
+
+  - id: fibratus_file_event_event
+    type: add_condition
+    prepend: true
+    conditions:
+      evt.name: CreateFile
     rule_conditions:
       - type: logsource
         category: file_event
