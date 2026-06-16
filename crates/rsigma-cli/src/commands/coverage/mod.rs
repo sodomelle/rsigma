@@ -264,8 +264,27 @@ fn tactic_slug(short: &str) -> Option<&'static str> {
 /// rules tagged.
 #[derive(Debug, Default)]
 pub(crate) struct TechniqueAgg {
-    pub(crate) rule_titles: BTreeSet<String>,
+    /// Distinct rules referencing this technique, keyed by rule identity (the
+    /// rule `id` when present, else its title) so two rules that happen to
+    /// share a title are still counted separately. Maps identity -> display
+    /// title.
+    rules: BTreeMap<String, String>,
     pub(crate) tactics: BTreeSet<String>,
+}
+
+impl TechniqueAgg {
+    /// Number of distinct rules referencing this technique.
+    pub(crate) fn rule_count(&self) -> usize {
+        self.rules.len()
+    }
+
+    /// Sorted, de-duplicated display titles of the referencing rules.
+    pub(crate) fn titles(&self) -> Vec<String> {
+        let mut titles: Vec<String> = self.rules.values().cloned().collect();
+        titles.sort();
+        titles.dedup();
+        titles
+    }
 }
 
 /// The ATT&CK coverage computed from a rule set.
@@ -291,17 +310,17 @@ impl Coverage {
     pub(crate) fn from_collection(collection: &SigmaCollection) -> Self {
         let mut cov = Coverage::default();
         for rule in &collection.rules {
-            cov.ingest(&rule.title, &rule.tags);
+            cov.ingest(rule.id.as_deref(), &rule.title, &rule.tags);
         }
         for corr in &collection.correlations {
-            cov.ingest(&corr.title, &corr.tags);
+            cov.ingest(corr.id.as_deref(), &corr.title, &corr.tags);
         }
         cov.untagged_rules.sort();
         cov.untagged_rules.dedup();
         cov
     }
 
-    fn ingest(&mut self, title: &str, tags: &[String]) {
+    fn ingest(&mut self, id: Option<&str>, title: &str, tags: &[String]) {
         self.rules_total += 1;
         let (techniques, tactics, has_attack) = classify_tags(tags);
         if has_attack {
@@ -309,12 +328,15 @@ impl Coverage {
         } else {
             self.untagged_rules.push(title.to_string());
         }
+        // Identify a rule by its id when present, else its title, so two
+        // distinct rules that share a title are still counted separately.
+        let identity = id.unwrap_or(title).to_string();
         for slug in &tactics {
             self.tactics.insert(slug.clone());
         }
         for tech in &techniques {
             let agg = self.techniques.entry(tech.clone()).or_default();
-            agg.rule_titles.insert(title.to_string());
+            agg.rules.insert(identity.clone(), title.to_string());
             for slug in &tactics {
                 agg.tactics.insert(slug.clone());
             }
@@ -452,12 +474,37 @@ tags: [attack.execution, attack.t1059]
 "#,
         );
         let agg = cov.techniques.get("T1059").unwrap();
-        assert_eq!(agg.rule_titles.len(), 2);
+        assert_eq!(agg.rule_count(), 2);
         assert_eq!(
             agg.tactics.iter().cloned().collect::<Vec<_>>(),
             vec!["execution".to_string()]
         );
         assert_eq!(cov.tactics.len(), 1);
+    }
+
+    #[test]
+    fn distinct_rules_sharing_a_title_count_separately() {
+        // Two rules with the same title but different ids both tag T1059.
+        // They are distinct rules and must be counted as 2, not collapsed.
+        let cov = coverage_from(
+            r#"
+title: Same Title
+id: 00000000-0000-0000-0000-0000000000d1
+logsource: {category: test, product: test}
+detection: {sel: {Image: a}, condition: sel}
+tags: [attack.t1059]
+---
+title: Same Title
+id: 00000000-0000-0000-0000-0000000000d2
+logsource: {category: test, product: test}
+detection: {sel: {Image: b}, condition: sel}
+tags: [attack.t1059]
+"#,
+        );
+        let agg = cov.techniques.get("T1059").unwrap();
+        assert_eq!(agg.rule_count(), 2);
+        // Display de-duplicates identical titles.
+        assert_eq!(agg.titles(), vec!["Same Title".to_string()]);
     }
 
     #[test]

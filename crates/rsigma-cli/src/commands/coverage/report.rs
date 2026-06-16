@@ -123,8 +123,8 @@ impl CoverageReport {
             .map(|(id, agg)| TechniqueEntry {
                 id: id.clone(),
                 tactics: agg.tactics.iter().cloned().collect(),
-                rule_count: agg.rule_titles.len(),
-                rules: agg.rule_titles.iter().cloned().collect(),
+                rule_count: agg.rule_count(),
+                rules: agg.titles(),
             })
             .collect();
 

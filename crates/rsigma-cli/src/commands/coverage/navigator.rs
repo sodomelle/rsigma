@@ -73,7 +73,7 @@ pub(crate) fn build_layer(coverage: &Coverage, name: &str) -> Layer {
     let mut techniques = Vec::with_capacity(coverage.techniques.len());
 
     for (id, agg) in &coverage.techniques {
-        let score = agg.rule_titles.len() as u64;
+        let score = agg.rule_count() as u64;
         max_score = max_score.max(score);
 
         // A parent technique with at least one annotated sub-technique is
@@ -87,7 +87,7 @@ pub(crate) fn build_layer(coverage: &Coverage, name: &str) -> Layer {
         techniques.push(NavTechnique {
             technique_id: id.clone(),
             score,
-            comment: comment_for(&agg.rule_titles),
+            comment: comment_for(&agg.titles()),
             enabled: true,
             show_subtechniques,
         });
@@ -123,7 +123,7 @@ pub(crate) fn to_pretty_json(layer: &Layer) -> String {
 
 /// Build a technique comment from its rule titles, capped so a technique
 /// referenced by many rules does not produce an unwieldy annotation.
-fn comment_for(titles: &std::collections::BTreeSet<String>) -> String {
+fn comment_for(titles: &[String]) -> String {
     let total = titles.len();
     let shown: Vec<&str> = titles
         .iter()
