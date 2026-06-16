@@ -4,6 +4,12 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
+### Fibratus conversion: emit the required `version` field (#NNN)
+
+Fibratus rules require a top-level `version` attribute (the rule content version, distinct from `min-engine-version`); the loader rejects a rule that omits it. The converted YAML envelope never emitted it, so every converted rule failed to load. Reported by @rabbitstack.
+
+- The envelope now emits `version:` right after `id` for both detection and correlation rules, regardless of `emit_metadata`. It defaults to `1.0.0` and is overridable with `-O version=<value>`.
+
 ### Fibratus conversion: file and remote-thread macro fixes (#217)
 
 Three Fibratus conversion bugs reported by @rabbitstack are fixed, so the converted rules now use the idiomatic macros the upstream loader expects instead of raw or unmapped predicates.
