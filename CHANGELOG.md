@@ -4,7 +4,7 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
-### Fibratus conversion: emit the required `version` field (#NNN)
+### Fibratus conversion: emit the required `version` field (#219)
 
 Fibratus rules require a top-level `version` attribute (the rule content version, distinct from `min-engine-version`); the loader rejects a rule that omits it. The converted YAML envelope never emitted it, so every converted rule failed to load. Reported by @rabbitstack.
 
