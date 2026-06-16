@@ -6,7 +6,7 @@
 
 The crate is delivered incrementally by phase. Phase 1 (Core Foundation) is complete with core primitives, deterministic SCO ID helpers, and vocabulary tables.
 
-Phase 2 (Data Model + Serialization) is **in progress**. The `model::common` and `model::meta` modules are in place; this work is not releasable on its own.
+Phase 2 (Data Model + Serialization) is **in progress**. The `model::common`, `model::meta`, and `model::sro` modules are in place; this work is not releasable on its own.
 
 ## Current scope
 
@@ -17,6 +17,7 @@ Phase 2 (Data Model + Serialization) is **in progress**. The `model::common` and
 - Open and closed vocabulary tables (`vocab`) including `OpinionValue` ordering.
 - `model::common` property containers (`SdoSroCommonProps`, `ScoCommonProps`, `ExternalReference`, `GranularMarking`, `ExtensionMap`).
 - `model::meta` objects (`MarkingDefinition`, `ExtensionDefinition`, `LanguageContent`, `MetaObject`) with TLP UUID constants.
+- `model::sro` objects (`Relationship`, `Sighting`, `WhereSightedRef`, `SroObject`).
 - Leaf-type serde (`StixId`, timestamps, typed IDs, `LanguageTag`) via `serde_impls/` and inline/`macro` impls.
 - Temporary `parse_bundle()` entrypoint that currently returns `ParseError::NotImplemented`.
 - Integration tests in `tests/spec.rs` backed by JSON fixtures under `tests/fixtures/spec/`.
@@ -64,6 +65,9 @@ rstix enforces STIX invariants at deserialize time (not deferred to a later vali
 - **`granular-marking`:** required non-empty `selectors`; `marking_ref` xor `lang`.
 - **`ExtensionDefinition`:** required `created_by_ref` (STIX §7.2.2).
 - **Meta object `type`:** deserialize rejects JSON whose `"type"` does not match the target struct.
+- **SRO object `type`:** same single-pass `"type"` validation for `Relationship` and `Sighting`.
+- **SRO invariants:** `Relationship` relationship-type charset and time ordering; `Sighting` count range, time-window ordering, and `where_sighted_refs` identity/location typing — see [crate README — Model invariant decisions](https://github.com/timescale/rsigma/blob/main/crates/rstix/README.md#model-invariant-decisions-modelcommon).
+- **SRO deferral:** `source_ref` / `target_ref` / `sighting_of_ref` SDO/SCO target validation waits for `StixObject` dispatch.
 - **Round-trip helpers:** `roundtrip_strict` requires full fixture equality for complete types. Subset `roundtrip` — every emitted field must match the fixture, extra fixture keys allowed, dropped fields not caught on object fixtures; for common-property structs that ignore extra SDO keys until concrete SDO types land in a later Phase 2 milestone.
 
 ## Feature flags

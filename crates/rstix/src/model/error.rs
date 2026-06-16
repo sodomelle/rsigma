@@ -29,4 +29,19 @@ pub enum ModelError {
         /// `type` value from the JSON document.
         actual: String,
     },
+    /// A `relationship` `relationship_type` contains characters outside `[a-z0-9-]`.
+    #[error("relationship type must contain only lowercase ASCII letters, digits, and hyphens")]
+    RelationshipTypeInvalid,
+    /// A `relationship` `stop_time` is not later than `start_time` when both are set.
+    #[error("relationship stop_time must be later than start_time")]
+    RelationshipStopTimeBeforeStartTime,
+    /// A `sighting` `count` is outside `0..=999_999_999`.
+    #[error("sighting count must be between 0 and 999_999_999 inclusive")]
+    SightingCountOutOfRange,
+    /// A `sighting` `last_seen` is earlier than `first_seen` when both are set.
+    #[error("sighting last_seen must be greater than or equal to first_seen")]
+    SightingLastSeenBeforeFirstSeen,
+    /// A `sighting` `where_sighted_refs` entry is not an identity or location id.
+    #[error("where_sighted_refs must reference identity or location objects")]
+    SightingWhereSightedRefInvalid,
 }

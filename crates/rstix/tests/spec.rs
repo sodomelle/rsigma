@@ -14,6 +14,7 @@ use rstix::model::common::{
 use rstix::model::meta::{
     ExtensionDefinition, LanguageContent, MarkingDefinition, TLP1_WHITE_ID, TLP2_CLEAR_ID,
 };
+use rstix::model::sro::{Relationship, Sighting};
 
 #[test]
 fn sdo_sro_round_trips_attack_pattern() {
@@ -235,4 +236,103 @@ fn language_content_round_trips() {
     let parsed = support::roundtrip_strict::<LanguageContent>("meta/language-content.json");
     assert_eq!(parsed.object_ref.type_name(), "attack-pattern");
     assert!(parsed.contents.contains_key("de"));
+}
+
+#[test]
+fn relationship_round_trips() {
+    let parsed = support::roundtrip_strict::<Relationship>("sro/relationship.json");
+    assert_eq!(parsed.relationship_type, "uses");
+    assert_eq!(parsed.source_ref.type_name(), "malware");
+    assert_eq!(parsed.target_ref.type_name(), "attack-pattern");
+    assert!(parsed.description.is_none());
+    assert!(parsed.start_time.is_none());
+    assert!(parsed.stop_time.is_none());
+}
+
+#[test]
+fn relationship_round_trips_with_times_and_description() {
+    let parsed = support::roundtrip_strict::<Relationship>("sro/relationship-with-times.json");
+    assert_eq!(parsed.relationship_type, "related-to");
+    assert!(parsed.description.is_some());
+    assert!(parsed.start_time.is_some());
+    assert!(parsed.stop_time.is_some());
+}
+
+#[test]
+fn relationship_round_trips_with_common_properties() {
+    let parsed =
+        support::roundtrip_strict::<Relationship>("sro/relationship-with-common-props-stix21.json");
+    assert!(parsed.common.created_by_ref.is_some());
+    assert_eq!(parsed.common.labels.len(), 1);
+    assert!(parsed.common.confidence.is_some());
+}
+
+#[test]
+fn relationship_rejects_invalid_fixtures() {
+    support::assert_fixture_rejects::<Relationship>("sro/relationship-stop-before-start.json");
+    support::assert_fixture_rejects::<Relationship>("sro/relationship-type-invalid.json");
+}
+
+#[test]
+fn sighting_round_trips_minimal_spec_example() {
+    let parsed = support::roundtrip_strict::<Sighting>("sro/sighting-minimal.json");
+    assert_eq!(parsed.sighting_of_ref.type_name(), "indicator");
+    assert!(parsed.common.created_by_ref.is_some());
+}
+
+#[test]
+fn sighting_round_trips_rich_spec_example() {
+    let parsed = support::roundtrip_strict::<Sighting>("sro/sighting-rich.json");
+    assert_eq!(parsed.sighting_of_ref.type_name(), "indicator");
+    assert_eq!(parsed.count, Some(50));
+    assert_eq!(parsed.summary, Some(false));
+    assert!(parsed.description.is_some());
+    assert_eq!(parsed.observed_data_refs.len(), 1);
+    assert_eq!(parsed.where_sighted_refs.len(), 1);
+    assert!(matches!(
+        &parsed.where_sighted_refs[0],
+        rstix::model::sro::WhereSightedRef::Identity(_)
+    ));
+}
+
+#[test]
+fn sighting_round_trips_with_location_where_sighted_ref() {
+    let parsed = support::roundtrip_strict::<Sighting>("sro/sighting-with-location.json");
+    assert!(matches!(
+        &parsed.where_sighted_refs[0],
+        rstix::model::sro::WhereSightedRef::Location(_)
+    ));
+}
+
+#[test]
+fn sighting_minimal_omits_empty_optionals() {
+    let parsed = support::roundtrip_strict::<Sighting>("sro/sighting-minimal.json");
+    let value = serde_json::to_value(&parsed).expect("serialize");
+    for absent in [
+        "description",
+        "first_seen",
+        "last_seen",
+        "count",
+        "summary",
+        "observed_data_refs",
+        "where_sighted_refs",
+    ] {
+        assert!(
+            value.get(absent).is_none(),
+            "expected {absent} to be omitted"
+        );
+    }
+}
+
+#[test]
+fn sighting_rejects_invalid_fixtures() {
+    support::assert_fixture_rejects::<Sighting>("sro/sighting-count-out-of-range.json");
+    support::assert_fixture_rejects::<Sighting>("sro/sighting-last-seen-before-first-seen.json");
+    support::assert_fixture_rejects::<Sighting>("sro/sighting-where-sighted-wrong-type.json");
+}
+
+#[test]
+fn sro_types_reject_wrong_type_field() {
+    support::assert_fixture_rejects::<Relationship>("sro/sighting-minimal.json");
+    support::assert_fixture_rejects::<Sighting>("sro/relationship.json");
 }

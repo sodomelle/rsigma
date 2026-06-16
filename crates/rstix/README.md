@@ -6,7 +6,7 @@
 Phase 1 (Core Foundation) is complete: core primitive types, deterministic SCO ID helpers,
 and vocabulary tables are available for downstream model/validation phases.
 
-Phase 2 (Data Model + Serialization) is **in progress**. The `model::common` and `model::meta` modules are in place; typed SRO/SCO/SDO objects, `StixObject` dispatch, and `Bundle` parsing follow in later Phase 2 work.
+Phase 2 (Data Model + Serialization) is **in progress**. The `model::common`, `model::meta`, and `model::sro` modules are in place; typed SCO/SDO objects, `StixObject` dispatch, and `Bundle` parsing follow in later work.
 
 This library is part of [rsigma].
 
@@ -34,7 +34,7 @@ This library is part of [rsigma].
 ### Module surface
 
 - `core` (always): `StixId`, typed IDs (42 wrappers), `StixObjectKind` + SDO/SCO/SRO/Meta discriminants, `StixTimestamp`, `TaxiiTimestamp`, `Confidence` and built-in scales, `SpecVersion`, `LanguageTag`, `QueryableStixObject`, `QueryValue`.
-- `model` (always): `ModelError`; `model::common` — `SdoSroCommonProps`, `ScoCommonProps`, `ExternalReference`, `GranularMarking`, `ExtensionMap`, and related types; `model::meta` — `MarkingDefinition`, `ExtensionDefinition`, `LanguageContent`, `MetaObject`, and TLP UUID constants.
+- `model` (always): `ModelError`; `model::common` — `SdoSroCommonProps`, `ScoCommonProps`, `ExternalReference`, `GranularMarking`, `ExtensionMap`, and related types; `model::meta` — `MarkingDefinition`, `ExtensionDefinition`, `LanguageContent`, `MetaObject`, and TLP UUID constants; `model::sro` — `Relationship`, `Sighting`, `WhereSightedRef`, `SroObject`, `RelSourceRef`, `RelTargetRef`, `SightingOfRef`, and `Sighting::COUNT_MAX`.
 - `id` (always): deterministic SCO ID derivation (`select_id_contributing_properties`, canonicalization, UUIDv5 generation).
 - `vocab` (always): open/closed vocabulary tables and `OpinionValue` ordering enum.
 - `serde_impls` (internal, `serde` feature): hand-written serializers for `StixId`, timestamps, and `Confidence`; typed-ID serde is generated in the `define_typed_id!` macro.
@@ -45,9 +45,9 @@ This library is part of [rsigma].
 
 ## Current Phase Status
 
-- **Phase:** 2 in progress (`model::common` and `model::meta` landed)
-- **Implemented:** `model::common`, leaf-type serde, and `model::meta` (marking-definition, extension-definition, language-content) with fixture-backed tests.
-- **Deferred:** SRO/SCO/SDO typed objects, `StixObject` dispatch, `Bundle` parsing, validation pipeline, graph/marking/store/TAXII runtime behaviors.
+- **Phase:** 2 in progress (`model::common`, `model::meta`, and `model::sro` landed)
+- **Implemented:** `model::common`, leaf-type serde, `model::meta` (marking-definition, extension-definition, language-content), and `model::sro` (relationship, sighting) with fixture-backed tests.
+- **Deferred:** SCO/SDO typed objects, `StixObject` dispatch, `Bundle` parsing, validation pipeline, graph/marking/store/TAXII runtime behaviors.
 
 ## Usage
 
@@ -164,8 +164,13 @@ Phase 2 validates STIX invariants at deserialize time (and via `new` / `validate
 | `external-reference` (STIX §2.5.2) | Non-empty `source_name` **and** at least one of `description`, `url`, or `external_id`. | `source_name`-only objects are invalid per spec; rejecting at deserialize catches bad CTI data early. Negative fixture: `external-reference-source-only.json`. |
 | `granular-marking` selectors | Field is **required** on deserialize (no `#[serde(default)]`); must be non-empty in `validate()`. | Empty or missing selectors are invalid; `with_marking_ref` / `with_lang` delegate to `new()` so the same rules apply programmatically. |
 | `ExtensionDefinition.created_by_ref` | Required on deserialize (`ExtensionDefinitionMissingCreatedByRef`). | STIX §7.2.2 requires the authoring identity reference for extension definitions. |
+| `Relationship.relationship_type` | ASCII `[a-z0-9-]` only; `stop_time` must be later than `start_time` when both set. | STIX §5.1.2 charset and time-window MUST rules. |
+| `Sighting.count` | `0..=999_999_999` when present. | STIX §5.2.1 inclusive range. |
+| `Sighting` time window | `last_seen >= first_seen` when both set. | STIX §5.2.1 ordering rule. |
+| `Sighting.where_sighted_refs` | Each entry must be `identity` or `location` (`WhereSightedRef`). | STIX §5.2.1 reference targets. |
+| `Relationship` / `Sighting` ref targets | `source_ref`, `target_ref`, `sighting_of_ref` accept any valid `StixId` at deserialize. | SDO/SCO-only / SDO-only validation deferred until `StixObject` dispatch. |
 | `ExtensionMap` | Public `insert()` mirrors `BTreeMap` semantics. | Programmatic extension assembly without reaching into the inner map. |
-| Round-trip helpers (`tests/support/roundtrip.rs`) | `roundtrip_strict`: re-serialized JSON must equal the fixture (complete types — meta objects, `ExternalReference`, `GranularMarking`, `ExtensionMap`). `roundtrip`: subset compare — every emitted field must match the fixture, extra fixture keys allowed, dropped fields not caught on object fixtures; use for `SdoSroCommonProps` / `ScoCommonProps` fixtures that carry unmodeled SDO keys until concrete SDO types land. | Strict mode catches dropped fields today; subset mode matches the Phase 2 common-prop testing contract from PR #201. |
+| Round-trip helpers (`tests/support/roundtrip.rs`) | `roundtrip_strict`: re-serialized JSON must equal the fixture (complete types — meta objects, SRO objects, `ExternalReference`, `GranularMarking`, `ExtensionMap`). `roundtrip`: subset compare — every emitted field must match the fixture, extra fixture keys allowed, dropped fields not caught on object fixtures; use for `SdoSroCommonProps` / `ScoCommonProps` fixtures that carry unmodeled SDO keys until concrete SDO types land. | Strict mode catches dropped fields today; subset mode matches the Phase 2 common-prop testing contract from PR #201. |
 
 ## License
 

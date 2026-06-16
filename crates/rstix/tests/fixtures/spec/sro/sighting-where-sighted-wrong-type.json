@@ -1,0 +1,11 @@
+{
+  "type": "sighting",
+  "spec_version": "2.1",
+  "id": "sighting--f2216352-483a-4941-842c-5328ad08abfd",
+  "created": "2016-05-12T08:17:27.000Z",
+  "modified": "2016-05-12T08:17:27.000Z",
+  "sighting_of_ref": "indicator--0c7b5b88-8ff7-4a4d-aa9d-feb398cd0061",
+  "where_sighted_refs": [
+    "malware--0c7b5b88-8ff7-4a4d-aa9d-feb398cd0061"
+  ]
+}

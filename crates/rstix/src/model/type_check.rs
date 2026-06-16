@@ -1,11 +1,11 @@
-//! STIX `type` field validation for meta object deserialization.
+//! STIX `type` field validation for typed object deserialization.
 
 use serde::Deserialize;
 
 use crate::model::ModelError;
 
-/// Reject JSON whose `type` field does not match the target meta struct.
-pub(super) fn check_stix_type(actual: &str, expected: &'static str) -> Result<(), ModelError> {
+/// Reject JSON whose `type` field does not match the expected STIX type name.
+pub(crate) fn check_stix_type(actual: &str, expected: &'static str) -> Result<(), ModelError> {
     if actual == expected {
         Ok(())
     } else {
@@ -18,7 +18,7 @@ pub(super) fn check_stix_type(actual: &str, expected: &'static str) -> Result<()
 
 /// Deserialize a STIX `type` string and validate it in a single pass (no intermediate
 /// [`serde_json::Value`]).
-pub(super) fn deserialize_stix_type_field<'de, D>(
+pub(crate) fn deserialize_stix_type_field<'de, D>(
     deserializer: D,
     expected: &'static str,
 ) -> Result<String, D::Error>

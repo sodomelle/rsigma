@@ -2,13 +2,17 @@
 //! share.
 //!
 //! This module is being built incrementally across Phase 2. It currently
-//! provides the common property containers (`common`) and Meta objects (`meta`)
-//! shared by every STIX object family; the remaining typed object enums and
-//! `Bundle` land in later Phase 2 work.
+//! provides the common property containers (`common`), Meta objects (`meta`),
+//! and SRO objects (`sro`); typed SCO/SDO objects, `StixObject` dispatch, and
+//! `Bundle` parsing land in later work.
 
 pub mod common;
 mod error;
 pub mod meta;
+pub mod sro;
+#[cfg(feature = "serde")]
+pub(crate) mod type_check;
 
 pub use error::ModelError;
 pub use meta::MetaObject;
+pub use sro::SroObject;
