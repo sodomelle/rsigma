@@ -4,7 +4,7 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
-### Webhook output sink: deliver detections to Slack, Teams, Discord, PagerDuty, or any HTTP endpoint
+### Webhook output sink: deliver detections to Slack, Teams, Discord, PagerDuty, or any HTTP endpoint (#227)
 
 A generic, template-driven webhook sink turns a detection or correlation into a templated HTTP request. It is one configurable sink rather than a set of bespoke integrations: Slack, Microsoft Teams, Discord, and PagerDuty ship as field-parametric YAML recipes in the [webhooks guide](https://timescale.github.io/rsigma/guide/webhooks/), while the engine stays service-agnostic.
 
