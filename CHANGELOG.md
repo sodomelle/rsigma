@@ -4,7 +4,7 @@ All notable changes to RSigma are documented in this file. Each entry correspond
 
 ## [Unreleased]
 
-### OTLP output sink: export detections over OTLP/HTTP and OTLP/gRPC
+### OTLP output sink: export detections over OTLP/HTTP and OTLP/gRPC (#223)
 
 The daemon can now emit detection and correlation results to an OpenTelemetry collector, completing OTLP transport symmetry with the existing OTLP receiver.
 
