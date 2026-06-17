@@ -51,6 +51,20 @@ webhooks:
       levels: [critical]
 "#;
 
+/// HTTPS webhook trusting a private CA, retrying once so the unreachable
+/// delivery reaches the DLQ quickly.
+const TLS_CFG: &str = r#"
+webhooks:
+  - id: internal
+    kind: detection
+    url: https://127.0.0.1:1/hook
+    body: '{"text":"${detection.rule.title}"}'
+    retry:
+      attempts: 1
+    tls:
+      ca: __CA__
+"#;
+
 /// Webhook with fast retry tuning so the retry loop runs within the test.
 const WEBHOOK_RETRY_CFG: &str = r#"
 webhooks:
@@ -268,6 +282,49 @@ fn webhook_env_header_is_interpolated() {
             .and_then(|v| v.to_str().ok()),
         Some("Bearer secret-xyz"),
         "the env-var header secret should be interpolated at render time",
+    );
+}
+
+#[test]
+fn webhook_tls_with_ca_routes_unreachable_to_dlq() {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+    // A private CA the webhook is told to trust. The endpoint is unreachable,
+    // so the handshake never happens; this exercises tls.ca file reading, the
+    // TLS client build, and the delivery path into the DLQ end to end.
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca_key = KeyPair::generate().unwrap();
+    let ca_pem = ca_params.self_signed(&ca_key).unwrap().pem();
+    let ca = temp_file(".pem", &ca_pem);
+
+    let cfg = TLS_CFG.replace("__CA__", &ca.path().display().to_string());
+    let webhook = temp_file(".yml", &cfg);
+    let rule = temp_file(".yml", SIMPLE_RULE);
+    let dlq = temp_file(".ndjson", "");
+    let dlq_spec = format!("file://{}", dlq.path().display());
+    let daemon = DaemonProcess::spawn_http_with_args(
+        rule.path().to_str().unwrap(),
+        &[
+            "--webhook",
+            webhook.path().to_str().unwrap(),
+            "--dlq",
+            &dlq_spec,
+        ],
+    );
+
+    let (status, _) = http_post(&daemon.url("/api/v1/events"), MATCHING_EVENT);
+    assert_eq!(status, 200);
+
+    let dlqd = poll_until(Duration::from_secs(10), || {
+        std::fs::read_to_string(dlq.path())
+            .unwrap_or_default()
+            .contains("webhook internal")
+            .then_some(())
+    });
+    assert!(
+        dlqd.is_some(),
+        "an https webhook with a custom CA should build TLS and route the unreachable delivery to the DLQ",
     );
 }
 

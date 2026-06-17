@@ -12,6 +12,7 @@ A generic, template-driven webhook sink turns a detection or correlation into a 
 - **Templating.** `url`, header values, and `body` are rendered per result with the same engine as enrichers (`${detection.*}`/`${correlation.*}` plus `${ENV_VAR}` for secrets). The body is JSON-string-escaped so an attacker-influenced rule title or event field cannot break the payload.
 - **Best-effort by design.** Webhooks run as lossy (`on_full=drop`) leaves on the async delivery layer, so a third-party endpoint never blocks the at-least-once token release for durable sinks; anything undeliverable lands in the `--dlq`. Connection/timeout errors, `429` (honoring a capped `Retry-After`), and `5xx` retry; other `4xx` route straight to the DLQ.
 - **Rate limiting and isolation.** An optional per-entry token bucket spaces requests; each webhook runs its own bounded queue and worker, so a slow webhook cannot stall other sinks.
+- **TLS to internal endpoints.** A per-webhook `tls:` block adds a custom CA bundle (for a relay served by a private CA) and a client cert/key for mutual TLS toward the endpoint. Public endpoints use the system roots with no extra config.
 - **Observability.** `rsigma_webhook_requests_total{webhook_id,outcome}` and `rsigma_webhook_request_duration_seconds{webhook_id}`; queue depth, retries, drops, and DLQ routing read from the shared per-sink series keyed by the webhook id.
 - **Egress and secrets.** Webhooks use the daemon's egress-filtered HTTP client (`--egress-policy`); keep secrets in the environment and reference them with `${ENV_VAR}`.
 

@@ -74,6 +74,10 @@ webhooks:
     scope:                          # all populated axes AND together
       levels: [high, critical]
     queue_size: 1024                # bounded queue; default 1024
+    tls:                            # optional; omit for public endpoints
+      ca: /etc/rsigma/tls/relay-ca.pem
+      client_cert: /etc/rsigma/tls/client.pem
+      client_key: /etc/rsigma/tls/client.key
 ```
 
 | Field | Required | Default | Notes |
@@ -91,6 +95,7 @@ webhooks:
 | `rate_limit.requests` / `rate_limit.per` | no | unlimited | Token-bucket budget; burst equals `requests`. |
 | `scope.rules` / `scope.tags` / `scope.levels` | no | unrestricted | Same axes as enricher [scopes](enrichers.md); each populated axis must match. |
 | `queue_size` | no | `1024` | Bounded queue depth between the dispatcher and the worker. |
+| `tls.ca` / `tls.client_cert` / `tls.client_key` | no | system roots | PEM file paths. `ca` trusts a private CA in addition to the system roots; `client_cert` and `client_key` (set together) enable mutual TLS. See [TLS to internal endpoints](#tls-to-internal-endpoints). |
 
 The `retry.*` and `queue_size` settings override the daemon's global
 `--sink-*` delivery defaults for this webhook only.
@@ -153,6 +158,35 @@ environment variables. TLS uses rustls with the system root store.
 
 Keep secrets in the environment and reference them with `${ENV_VAR}`; do not
 put tokens or signing URLs in the webhook YAML.
+
+## TLS to internal endpoints
+
+Public services (Slack, Teams, Discord, PagerDuty) are reached over HTTPS with
+the system root store, so they need no `tls:` block. For an internal relay
+served by a private CA, or an endpoint that requires client authentication, add
+a `tls:` block:
+
+- `tls.ca` is a PEM bundle trusted in addition to the system roots, so a relay
+  whose certificate chains to a private CA verifies.
+- `tls.client_cert` and `tls.client_key` (set together) present a client
+  certificate for mutual TLS.
+
+```yaml
+webhooks:
+  - id: internal-relay
+    kind: detection
+    url: https://relay.internal:8443/alerts
+    body: '{"text": "${detection.rule.title}"}'
+    tls:
+      ca: /etc/rsigma/tls/relay-ca.pem
+      client_cert: /etc/rsigma/tls/client.pem
+      client_key: /etc/rsigma/tls/client.key
+```
+
+Webhook TLS uses rustls and verifies the endpoint against the URL host. PEM
+files are read and validated at startup, so a missing file, a malformed
+certificate, or a `client_cert` without its `client_key` rejects the daemon
+with a clear error.
 
 ## Observability
 

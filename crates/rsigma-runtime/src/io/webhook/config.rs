@@ -24,7 +24,8 @@ use rsigma_eval::ResultBody;
 use serde::Deserialize;
 
 use crate::enrichment::{
-    EnricherKind, Scope, TemplateError, build_default_http_client, validate_template_namespace,
+    EnricherKind, HttpEnricherClient, Scope, TemplateError, build_default_http_client,
+    validate_template_namespace,
 };
 use crate::io::DeliveryConfig;
 use crate::metrics::MetricsHook;
@@ -98,6 +99,28 @@ pub struct WebhookConfig {
     /// Bounded queue depth. Defaults to [`DEFAULT_WEBHOOK_QUEUE_SIZE`].
     #[serde(default)]
     pub queue_size: Option<usize>,
+    /// Optional TLS material for the endpoint: a custom CA bundle and/or a
+    /// client identity for mutual TLS. Omit it to use the system roots (the
+    /// common case for public services like Slack).
+    #[serde(default)]
+    pub tls: Option<WebhookTlsConfig>,
+}
+
+/// `tls:` block. PEM file paths read at startup.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WebhookTlsConfig {
+    /// Custom CA bundle (PEM file path) to trust in addition to the system
+    /// roots. Use for an internal relay served by a private CA.
+    #[serde(default)]
+    pub ca: Option<String>,
+    /// Client certificate chain (PEM file path) for mutual TLS. Requires
+    /// `client_key`.
+    #[serde(default)]
+    pub client_cert: Option<String>,
+    /// Client private key (PEM file path) for mutual TLS. Requires
+    /// `client_cert`.
+    #[serde(default)]
+    pub client_key: Option<String>,
 }
 
 /// `retry:` block. Each field overrides a delivery-layer default.
@@ -223,6 +246,8 @@ pub enum WebhookConfigError {
     InvalidRateLimit { webhook_id: String, message: String },
     /// `scope` failed to compile.
     Scope { webhook_id: String, message: String },
+    /// `tls` material was invalid or unreadable.
+    Tls { webhook_id: String, message: String },
     /// The shared HTTP client could not be built.
     Client { message: String },
 }
@@ -276,6 +301,10 @@ impl std::fmt::Display for WebhookConfigError {
                 webhook_id,
                 message,
             } => write!(f, "webhook '{webhook_id}': {message}"),
+            WebhookConfigError::Tls {
+                webhook_id,
+                message,
+            } => write!(f, "webhook '{webhook_id}': {message}"),
             WebhookConfigError::Client { message } => {
                 write!(f, "webhook HTTP client build failed: {message}")
             }
@@ -316,7 +345,7 @@ pub fn build_webhooks(
 
 fn build_one(
     cfg: WebhookConfig,
-    client: crate::enrichment::HttpEnricherClient,
+    default_client: HttpEnricherClient,
     metrics: Arc<dyn MetricsHook>,
 ) -> Result<BuiltWebhook, WebhookConfigError> {
     let kind = WebhookKind::parse(&cfg.kind).ok_or_else(|| WebhookConfigError::UnknownKind {
@@ -409,11 +438,89 @@ fn build_one(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    // A webhook with a `tls:` block gets a dedicated egress-filtered client
+    // carrying its CA and/or client identity; the rest share the default.
+    let client = match &cfg.tls {
+        Some(tls) => build_tls_client(&cfg.id, tls)?,
+        None => default_client,
+    };
+
     metrics.register_webhook(&cfg.id);
     let sink = WebhookSink::new(
         cfg.id, kind, method, cfg.url, headers, cfg.body, timeout, scope, limiter, client, metrics,
     );
     Ok(BuiltWebhook { sink, delivery })
+}
+
+/// Build an egress-filtered `reqwest` client carrying a webhook's TLS material.
+///
+/// The CA bundle is trusted in addition to the system roots; a client cert and
+/// key together enable mutual TLS. Egress filtering (SSRF defense) is preserved
+/// via the same DNS resolver the default client uses.
+fn build_tls_client(
+    id: &str,
+    tls: &WebhookTlsConfig,
+) -> Result<HttpEnricherClient, WebhookConfigError> {
+    let err = |message: String| WebhookConfigError::Tls {
+        webhook_id: id.to_string(),
+        message,
+    };
+    match (&tls.client_cert, &tls.client_key) {
+        (Some(_), Some(_)) | (None, None) => {}
+        _ => {
+            return Err(err(
+                "tls.client_cert and tls.client_key must be set together for mutual TLS"
+                    .to_string(),
+            ));
+        }
+    }
+
+    ensure_crypto_provider();
+    let resolver =
+        crate::egress::EgressFilteredResolver::new(crate::egress::default_egress_policy())
+            .into_dns_resolver();
+    let mut builder = reqwest::Client::builder().dns_resolver(resolver);
+
+    if let Some(ca_path) = &tls.ca {
+        let pem = std::fs::read(ca_path)
+            .map_err(|e| err(format!("failed to read tls.ca '{ca_path}': {e}")))?;
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .map_err(|e| err(format!("invalid tls.ca PEM: {e}")))?;
+        builder = builder.add_root_certificate(cert);
+    }
+
+    if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
+        let cert = std::fs::read(cert_path)
+            .map_err(|e| err(format!("failed to read tls.client_cert '{cert_path}': {e}")))?;
+        let key = std::fs::read(key_path)
+            .map_err(|e| err(format!("failed to read tls.client_key '{key_path}': {e}")))?;
+        // reqwest's rustls identity wants a single PEM buffer of cert + key.
+        let mut pem = cert;
+        pem.push(b'\n');
+        pem.extend_from_slice(&key);
+        let identity = reqwest::Identity::from_pem(&pem)
+            .map_err(|e| err(format!("invalid client identity PEM: {e}")))?;
+        builder = builder.identity(identity);
+    }
+
+    builder
+        .build()
+        .map(|c| HttpEnricherClient::from_reqwest(std::sync::Arc::new(c)))
+        .map_err(|e| err(format!("TLS client build failed: {e}")))
+}
+
+/// Pin the process-default rustls `CryptoProvider` when more than one is in the
+/// dependency tree.
+///
+/// With the `otlp` feature, tonic pulls aws-lc-rs and reqwest pulls ring, so
+/// rustls cannot auto-select a default and a TLS client build would panic; pin
+/// aws-lc-rs to match the daemon's other TLS surfaces. Without `otlp` there is
+/// a single provider and reqwest self-configures, so this is a no-op.
+fn ensure_crypto_provider() {
+    #[cfg(feature = "otlp")]
+    {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
 }
 
 fn check_template(
@@ -611,6 +718,88 @@ webhooks:
 "#,
         );
         assert!(file.is_err(), "humantime parse should fail at deserialize");
+    }
+
+    #[test]
+    fn tls_webhook_with_ca_and_identity_builds() {
+        use std::io::Write;
+
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_pem = ca_params.self_signed(&ca_key).unwrap().pem();
+
+        let client_key = KeyPair::generate().unwrap();
+        let client_pem = CertificateParams::new(vec!["client".to_string()])
+            .unwrap()
+            .self_signed(&client_key)
+            .unwrap()
+            .pem();
+        let client_key_pem = client_key.serialize_pem();
+
+        let write = |contents: &str| {
+            let mut f = tempfile::Builder::new().suffix(".pem").tempfile().unwrap();
+            f.write_all(contents.as_bytes()).unwrap();
+            f.flush().unwrap();
+            f
+        };
+        let ca = write(&ca_pem);
+        let cert = write(&client_pem);
+        let key = write(&client_key_pem);
+
+        let yaml = format!(
+            r#"
+webhooks:
+  - id: internal
+    kind: detection
+    url: https://relay.internal/hook
+    tls:
+      ca: {ca}
+      client_cert: {cert}
+      client_key: {key}
+"#,
+            ca = ca.path().display(),
+            cert = cert.path().display(),
+            key = key.path().display(),
+        );
+        let built = build(&yaml).expect("a webhook with a CA and client identity should build");
+        assert_eq!(built.len(), 1);
+    }
+
+    #[test]
+    fn tls_client_cert_without_key_is_rejected() {
+        let err = build_err(
+            r#"
+webhooks:
+  - id: internal
+    kind: detection
+    url: https://relay.internal/hook
+    tls:
+      client_cert: /nonexistent/cert.pem
+"#,
+        );
+        assert!(
+            err.to_string()
+                .contains("must be set together for mutual TLS"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn tls_unreadable_ca_is_rejected() {
+        let err = build_err(
+            r#"
+webhooks:
+  - id: internal
+    kind: detection
+    url: https://relay.internal/hook
+    tls:
+      ca: /nonexistent/ca.pem
+"#,
+        );
+        assert!(err.to_string().contains("failed to read tls.ca"), "{err}");
     }
 
     #[test]
