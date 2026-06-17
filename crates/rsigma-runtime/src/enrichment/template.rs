@@ -173,10 +173,35 @@ pub fn validate_template_namespace(
 /// the empty string rather than panicking, since the same render path is
 /// reused by tests.
 pub fn render_template(text: &str, result: &EvaluationResult) -> String {
+    render_with(text, result, |s| s)
+}
+
+/// Like [`render_template`], but JSON-string-escapes every substituted value.
+///
+/// Use this for a templated body that is a JSON document: interpolated values
+/// (rule titles, event field strings) are attacker-influenced, so a value
+/// containing a quote, backslash, or control character would otherwise break
+/// the rendered payload. The escaper serializes each substitution as a JSON
+/// string and strips the surrounding quotes, yielding content safe to drop
+/// inside a JSON string literal. `url`/`headers` keep [`render_template`]
+/// (identity escaping) because they are not JSON.
+// Consumed by the webhook sink, wired up in the next commit of this PR.
+#[allow(dead_code)]
+pub fn render_template_json(text: &str, result: &EvaluationResult) -> String {
+    render_with(text, result, json_escape_value)
+}
+
+/// Shared render core: substitute every `${...}` reference, then run each
+/// substituted value through `escape`.
+fn render_with<F: Fn(String) -> String>(
+    text: &str,
+    result: &EvaluationResult,
+    escape: F,
+) -> String {
     TEMPLATE_RE
         .replace_all(text, |caps: &regex::Captures| {
             let inner = caps.get(1).unwrap().as_str();
-            match classify_ref(inner) {
+            let raw = match classify_ref(inner) {
                 VarRef::Env(name) => std::env::var(name).unwrap_or_default(),
                 VarRef::Detection(path) => match &result.body {
                     ResultBody::Detection(_) => render_detection_path(&path, result),
@@ -187,9 +212,21 @@ pub fn render_template(text: &str, result: &EvaluationResult) -> String {
                     ResultBody::Detection(_) => String::new(),
                 },
                 VarRef::Invalid(_) => String::new(),
-            }
+            };
+            escape(raw)
         })
         .into_owned()
+}
+
+/// JSON-string-escape a substituted value: serialize it as a JSON string and
+/// drop the surrounding quotes.
+#[allow(dead_code)]
+fn json_escape_value(s: String) -> String {
+    let quoted = serde_json::to_string(&s).unwrap_or_else(|_| "\"\"".to_string());
+    quoted
+        .get(1..quoted.len().saturating_sub(1))
+        .unwrap_or("")
+        .to_string()
 }
 
 fn render_detection_path(path: &str, result: &EvaluationResult) -> String {
@@ -409,4 +446,61 @@ impl Enricher for TemplateEnricher {
 #[allow(dead_code)]
 fn _use_err(_e: EnrichError) -> EnrichErrorKind {
     EnrichErrorKind::TemplateRender(String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use rsigma_eval::result::{DetectionBody, FieldMatch, ResultBody, RuleHeader};
+
+    fn detection(title: &str, field: &str, value: serde_json::Value) -> EvaluationResult {
+        EvaluationResult {
+            header: RuleHeader {
+                rule_title: title.to_string(),
+                rule_id: Some("rule-1".to_string()),
+                level: Some(Level::High),
+                tags: vec![],
+                custom_attributes: Arc::new(HashMap::new()),
+                enrichments: None,
+            },
+            body: ResultBody::Detection(DetectionBody {
+                matched_selections: vec!["selection".to_string()],
+                matched_fields: vec![FieldMatch::new(field, value)],
+                event: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn identity_render_is_unchanged() {
+        let r = detection("Whoami", "CommandLine", serde_json::json!("whoami /all"));
+        assert_eq!(
+            render_template(
+                "rule=${detection.rule.title} cmd=${detection.fields.CommandLine}",
+                &r
+            ),
+            "rule=Whoami cmd=whoami /all",
+        );
+    }
+
+    #[test]
+    fn json_escape_keeps_payload_valid_with_hostile_values() {
+        // A rule title with a quote, backslash, newline, and a control char
+        // would break a JSON body without escaping.
+        let r = detection("evil \" \\ \n\u{0001} title", "x", serde_json::json!("v"));
+        let body = render_template_json(r#"{"text":"${detection.rule.title}"}"#, &r);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("escaped body must be valid JSON");
+        assert_eq!(parsed["text"], "evil \" \\ \n\u{0001} title");
+    }
+
+    #[test]
+    fn json_escape_leaves_safe_values_untouched() {
+        let r = detection("PlainTitle", "x", serde_json::json!("v"));
+        let body = render_template_json(r#"{"text":"${detection.rule.title}"}"#, &r);
+        assert_eq!(body, r#"{"text":"PlainTitle"}"#);
+    }
 }
